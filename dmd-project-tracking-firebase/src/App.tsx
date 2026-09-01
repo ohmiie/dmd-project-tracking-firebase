@@ -97,7 +97,7 @@ const ProgressBar = ({ percent }) => {
   );
 };
 
-const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, currentUser, repairUserLogin }) => {
+const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, currentUser }) => {
   const LEVELS = db.catalogs?.levels?.length ? db.catalogs.levels : DEFAULT_LEVELS;
   const ROOMS = db.catalogs?.rooms?.length ? db.catalogs.rooms : DEFAULT_ROOMS;
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -111,6 +111,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
 
   const handleSave = async () => {
     if(!formData.id || !formData.fname || !formData.lname) return showToast('กรุณากรอกข้อมูลให้ครบถ้วน', 'error');
+    if (String(formData.id).trim().length < 6) return showToast('รหัสนักศึกษา/อาจารย์ต้องมีอย่างน้อย 6 ตัวอักษร เพื่อใช้เข้าสู่ระบบได้โดยตรง', 'error');
     let newUsers = [...db.users];
     const roleName = activeTab === 'students' ? 'student' : 'teacher';
     const isEdit = !!editingUser;
@@ -143,7 +144,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
     const BOM = "\uFEFF";
     const header = activeTab === 'students'
       ? "id,title,fname,lname,level,room\n66001,นาย,สมชาย,ใจดี,ปวช. 1,1"
-      : "id,title,fname,lname\nT001,อาจารย์,สมศรี,สอนดี";
+      : "id,title,fname,lname\n995622,อาจารย์,สมศรี,สอนดี";
     const blob = new Blob([BOM + header], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
@@ -261,7 +262,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
           <div><h3 className="text-lg font-bold">{activeTab==='students'?'ข้อมูลนักศึกษา':'ข้อมูลอาจารย์'}</h3><p className="text-xs text-gray-500">เพิ่ม แก้ไข ลบ หรือนำเข้าด้วย CSV</p></div>
           <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={downloadCSVTemplate}><Download size={16}/> ตัวอย่าง CSV</Button><input type="file" accept=".csv,text/csv" ref={fileInputRef} className="hidden" onChange={handleFileUpload}/><Button variant="secondary" onClick={()=>fileInputRef.current?.click()}><Upload size={16}/> นำเข้า CSV</Button><Button onClick={()=>openModal()}><Plus size={16}/> เพิ่ม</Button></div>
         </div>
-        <Card className="overflow-x-auto"><table className="w-full text-sm min-w-[600px]"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left p-3">รหัส</th><th className="text-left p-3">ชื่อ-สกุล</th>{activeTab==='students'&&<th className="text-left p-3">ระดับชั้น / ห้อง</th>}<th className="text-right p-3">จัดการ</th></tr></thead><tbody>{filteredUsers.map(user=><tr key={user.id} className="border-t hover:bg-gray-50"><td className="p-3 font-medium">{user.id}</td><td className="p-3">{user.title}{user.fname} {user.lname}</td>{activeTab==='students'&&<td className="p-3">{user.level} / {user.room}</td>}<td className="p-3"><div className="flex justify-end gap-1"><button title="ตรวจ/สร้างบัญชีเข้าสู่ระบบ" onClick={()=>repairUserLogin(user)} className="p-2 text-green-600 hover:bg-green-50 rounded"><ShieldCheck size={16}/></button><button onClick={()=>openModal(user)} className="p-2 text-blue-600 hover:bg-blue-50 rounded"><Edit2 size={16}/></button><button onClick={()=>handleDelete(user.id)} className="p-2 text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div></td></tr>)}{!filteredUsers.length&&<tr><td colSpan={4} className="p-8 text-center text-gray-400">ยังไม่มีข้อมูล</td></tr>}</tbody></table></Card>
+        <Card className="overflow-x-auto"><table className="w-full text-sm min-w-[600px]"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left p-3">รหัส</th><th className="text-left p-3">ชื่อ-สกุล</th>{activeTab==='students'&&<th className="text-left p-3">ระดับชั้น / ห้อง</th>}<th className="text-right p-3">จัดการ</th></tr></thead><tbody>{filteredUsers.map(user=><tr key={user.id} className="border-t hover:bg-gray-50"><td className="p-3 font-medium">{user.id}</td><td className="p-3">{user.title}{user.fname} {user.lname}</td>{activeTab==='students'&&<td className="p-3">{user.level} / {user.room}</td>}<td className="p-3"><div className="flex justify-end gap-1"><button onClick={()=>openModal(user)} className="p-2 text-blue-600 hover:bg-blue-50 rounded"><Edit2 size={16}/></button><button onClick={()=>handleDelete(user.id)} className="p-2 text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div></td></tr>)}{!filteredUsers.length&&<tr><td colSpan={4} className="p-8 text-center text-gray-400">ยังไม่มีข้อมูล</td></tr>}</tbody></table></Card>
       </div>}
 
       {activeTab === 'catalogs' && <div className="grid md:grid-cols-2 gap-6">
@@ -797,8 +798,9 @@ export default function App() {
 
   const clean = value => JSON.parse(JSON.stringify(value ?? null));
   const loginKey = value => Array.from(String(value || '').trim().toLowerCase()).map(ch => /[a-z0-9]/.test(ch) ? ch : `x${ch.codePointAt(0).toString(16)}`).join('');
-  const emailFor = (userRole, id) => userRole === 'admin' ? 'admin@dmd.example.com' : `${userRole}.${loginKey(id)}@dmd.example.com`;
-  const defaultPasswordFor = id => `Dmd@${String(id || '').trim()}`;
+  const emailFor = (userRole, id) => userRole === 'admin' ? 'admin@dmd.example.com' : `${userRole}.${loginKey(id)}@dmd-login.example.com`;
+  // นักศึกษา/อาจารย์ใช้รหัสประจำตัวเดียวในการเข้าสู่ระบบ ระบบจะซ่อน Firebase email ไว้ภายใน
+  const defaultPasswordFor = id => String(id || '').trim();
 
   const getDocsArray = async (name, qRef = null) => {
     const snap = await getDocs(qRef || collection(firestore, name));
@@ -908,17 +910,18 @@ export default function App() {
     const creatorAuth = ensureCreatorAuth();
     const email = emailFor(u.role, u.id);
     const password = defaultPasswordFor(u.id);
+    if (password.length < 6) throw new Error(`รหัส ${u.id} ต้องมีอย่างน้อย 6 ตัวอักษร`);
     try {
       try {
         const signed = await signInWithEmailAndPassword(creatorAuth, email, password);
         return signed.user.uid;
-      } catch (_) {
+      } catch (signErr) {
         try {
           const created = await createUserWithEmailAndPassword(creatorAuth, email, password);
           return created.user.uid;
         } catch (createErr) {
           if (createErr?.code === 'auth/email-already-in-use') {
-            throw new Error(`บัญชีรหัส ${u.id} มีอยู่ใน Firebase Authentication แล้ว แต่รหัสผ่านไม่ตรงกับรหัสเริ่มต้น กรุณาลบบัญชีเดิมใน Authentication แล้วกดปุ่มตรวจบัญชีอีกครั้ง`);
+            throw new Error(`บัญชีรหัส ${u.id} มีอยู่แล้วแต่รหัสเข้าสู่ระบบไม่ตรง กรุณาแจ้งผู้จัดการระบบ`);
           }
           throw createErr;
         }
@@ -928,27 +931,39 @@ export default function App() {
     }
   };
 
-  const repairUserLogin = async (u) => {
-    try {
-      setLoading(true);
+  const provisionAllExistingLogins = async () => {
+    const snap = await getDocs(collection(firestore, 'users'));
+    const existing = snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
+    const candidates = existing.filter(u => ['student','teacher'].includes(u.role) && u.active !== false);
+    let repaired = 0;
+    for (const u of candidates) {
       const uid = await ensureLoginAccount(u);
-      const oldUid = u.uid || u._docId;
+      const oldDocId = u._docId;
       const profile = { ...clean(u), uid, email: emailFor(u.role, u.id), active: true, updatedAt: Date.now() };
       delete profile._docId;
       await setDoc(doc(firestore, 'users', uid), profile, { merge: true });
-      if (oldUid && oldUid !== uid) {
-        try { await deleteDoc(doc(firestore, 'users', oldUid)); } catch (_) {}
+      if (oldDocId && oldDocId !== uid) {
+        try { await deleteDoc(doc(firestore, 'users', oldDocId)); } catch (_) {}
       }
-      if (u.role === 'student') await setDoc(doc(firestore, 'publicStudents', u.id), { id:u.id, title:u.title||'', fname:u.fname||'', lname:u.lname||'', level:u.level||'', room:u.room||'', role:'student' });
-      await loadPrivate(auth.currentUser, 'admin');
-      showToast(`บัญชีเข้าสู่ระบบรหัส ${u.id} พร้อมใช้งานแล้ว`);
-    } catch (err) {
-      console.error(err);
-      showToast(`ตรวจบัญชีไม่สำเร็จ: ${err?.message || err}`, 'error');
-    } finally {
-      setLoading(false);
+      if (u.role === 'student') {
+        await setDoc(doc(firestore, 'publicStudents', u.id), { id:u.id, title:u.title||'', fname:u.fname||'', lname:u.lname||'', level:u.level||'', room:u.room||'', role:'student' });
+      }
+      repaired++;
     }
+
+    // ซิงก์ UID ของสมาชิกและอาจารย์ในกลุ่มให้ตรงกับบัญชี Authentication ล่าสุด
+    const freshUsersSnap = await getDocs(collection(firestore, 'users'));
+    const freshUsers = freshUsersSnap.docs.map(d => ({ ...d.data(), uid: d.id }));
+    const groupsSnap = await getDocs(collection(firestore, 'groups'));
+    for (const gd of groupsSnap.docs) {
+      const g = gd.data();
+      const teacher = freshUsers.find(u => u.id === g.teacherId && u.role === 'teacher');
+      const memberUids = (g.members || []).map(id => freshUsers.find(u => u.id === id && u.role === 'student')?.uid).filter(Boolean);
+      await setDoc(gd.ref, { teacherUid: teacher?.uid || '', memberUids, updatedAt: Date.now() }, { merge: true });
+    }
+    return repaired;
   };
+
 
   const syncUsers = async nextUsers => {
     const prev = db.users.filter(u => ['student','teacher'].includes(u.role));
@@ -956,12 +971,8 @@ export default function App() {
     const finalUsers = [];
 
     for (const u of next) {
-      let uid = u.uid;
-      if (!uid) {
-        const existing = await getDocs(query(collection(firestore, 'users'), where('id', '==', u.id)));
-        if (!existing.empty) uid = existing.docs[0].id;
-      }
-      if (!uid) uid = await ensureLoginAccount(u);
+      // ทุกครั้งที่บันทึก ต้องตรวจ Authentication จริงเสมอ ไม่เชื่อ uid เก่าจาก Firestore
+      const uid = await ensureLoginAccount(u);
       const profile = { ...clean(u), uid, email: emailFor(u.role, u.id), active: true, updatedAt: Date.now() };
       delete profile._docId;
       await setDoc(doc(firestore, 'users', uid), profile, { merge: true });
@@ -1037,7 +1048,11 @@ export default function App() {
       const email = emailFor(role, loginId);
       const password = role === 'admin' ? loginPassword : defaultPasswordFor(loginId);
       const cred = await signInWithEmailAndPassword(auth, email, password);
-      if (role === 'admin') await bootstrapAdmin(cred.user);
+      if (role === 'admin') {
+        await bootstrapAdmin(cred.user);
+        const count = await provisionAllExistingLogins();
+        if (count > 0) showToast(`ตรวจและเตรียมบัญชีผู้ใช้ ${count} รายการเรียบร้อยแล้ว`);
+      }
       const snap = await getDoc(doc(firestore, 'users', cred.user.uid));
       if (!snap.exists()) throw new Error('ยังไม่มีสิทธิ์ใช้งานในระบบ');
       const profile = { ...snap.data(), uid: cred.user.uid };
@@ -1058,7 +1073,7 @@ export default function App() {
   };
 
   if (loading) {
-    return <div className="min-h-screen bg-gray-50 flex flex-col justify-center items-center p-4"><Loader2 className="animate-spin text-blue-600 mb-4" size={48}/><h2 className="text-xl font-semibold text-gray-700">กำลังเชื่อมต่อ Firebase...</h2><p className="text-sm text-gray-500 mt-2">โปรดรอสักครู่</p></div>;
+    return <div className="min-h-screen bg-gray-50 flex flex-col justify-center items-center p-4"><Loader2 className="animate-spin text-blue-600 mb-4" size={48}/><h2 className="text-xl font-semibold text-gray-700">DMD Integrated Project Tracking System</h2><p className="text-sm text-gray-500 mt-2">โปรดรอสักครู่</p></div>;
   }
 
   if (!role || !currentUser) {
@@ -1079,9 +1094,9 @@ export default function App() {
               <form onSubmit={handleLogin} className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-300">
                 <div className="flex items-center gap-2 text-blue-600 font-semibold mb-2"><button type="button" onClick={() => setRole(null)} className="p-1 hover:bg-blue-50 rounded"><ChevronRight className="rotate-180" size={18}/></button>เข้าสู่ระบบในฐานะ {role === 'student' ? 'นักศึกษา' : role === 'teacher' ? 'อาจารย์ผู้ควบคุม' : role === 'admin' ? 'ผู้จัดการระบบ' : 'ผู้เข้าชม'}</div>
                 {role === 'parent' ? <Input label="ค้นหานักศึกษา" placeholder="กรอกรหัสนักศึกษา หรือ ชื่อ..." required value={searchQuery} onChange={e => setSearchQuery(e.target.value)}/> : <Input label="รหัสผู้ใช้งาน" placeholder="กรอกรหัส..." required value={loginId} onChange={e => setLoginId(e.target.value)}/>} 
-                {role === 'admin' && <Input label="รหัสผ่าน Admin" type="password" placeholder="รหัสผ่านที่สร้างใน Firebase" required value={loginPassword} onChange={e => setLoginPassword(e.target.value)}/>} 
+                {role === 'admin' && <Input label="รหัสผ่าน Admin" type="password" placeholder="กรอกรหัสผ่านผู้จัดการระบบ" required value={loginPassword} onChange={e => setLoginPassword(e.target.value)}/>} 
                 <Button type="submit" className="w-full mt-4">เข้าสู่ระบบ</Button>
-                <div className="text-xs text-gray-400 mt-6 pt-4 border-t text-center flex flex-col gap-1 items-center justify-center"><span className="flex items-center gap-1"><ShieldCheck size={14}/> เชื่อมต่อ Firebase + Cloud Firestore</span>{role === 'admin' && <span>รหัสผู้ใช้ Admin: <b>admin</b></span>}{(role === 'student' || role === 'teacher') && <span>เข้าสู่ระบบด้วยรหัสที่ผู้จัดการระบบลงทะเบียน</span>}</div>
+                <div className="text-xs text-gray-400 mt-6 pt-4 border-t text-center flex flex-col gap-1 items-center justify-center"><span className="flex items-center gap-1"><ShieldCheck size={14}/> ระบบพร้อมใช้งาน</span>{role === 'admin' && <span>รหัสผู้ใช้ Admin: <b>admin</b></span>}{(role === 'student' || role === 'teacher') && <span>ใช้รหัสประจำตัวเข้าสู่ระบบได้โดยตรง</span>}</div>
               </form>
             )}
           </div>
@@ -1095,7 +1110,7 @@ export default function App() {
     <div className="min-h-screen bg-gray-50/50 font-sans text-gray-900 flex flex-col relative">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-40 shadow-sm"><div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between"><div className="flex items-center gap-3"><div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold">D</div><h1 className="font-bold text-lg hidden sm:block">DMD Project Tracking</h1></div><div className="flex items-center gap-4"><div className="text-right hidden md:block"><p className="text-sm font-semibold">{currentUser.title}{currentUser.fname} {currentUser.lname}</p><p className="text-xs text-gray-500 capitalize">{role}</p></div><button onClick={logout} className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg flex items-center gap-2 text-sm font-medium"><LogOut size={18}/> <span className="hidden sm:inline">ออกจากระบบ</span></button></div></div></header>
       <main className="flex-grow w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 animate-in fade-in duration-500">
-        {role === 'admin' && <AdminView db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt} currentUser={currentUser} repairUserLogin={repairUserLogin}/>} 
+        {role === 'admin' && <AdminView db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt} currentUser={currentUser}/>} 
         {role === 'teacher' && <TeacherView user={currentUser} db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt}/>} 
         {role === 'student' && <ProgressDashboard db={db} targetStudent={currentUser} isParent={false} handleUpdate={handleUpdate} showToast={showToast} askPrompt={askPrompt}/>} 
         {role === 'parent' && <ProgressDashboard db={db} targetStudent={currentUser} isParent={true}/>} 
