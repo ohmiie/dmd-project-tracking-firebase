@@ -97,7 +97,7 @@ const ProgressBar = ({ percent }) => {
   );
 };
 
-const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, currentUser }) => {
+const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, currentUser, repairUserLogin }) => {
   const LEVELS = db.catalogs?.levels?.length ? db.catalogs.levels : DEFAULT_LEVELS;
   const ROOMS = db.catalogs?.rooms?.length ? db.catalogs.rooms : DEFAULT_ROOMS;
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -109,19 +109,20 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
   const isUserTab = activeTab === 'students' || activeTab === 'teachers';
   const filteredUsers = db.users.filter(u => u.role === (activeTab === 'students' ? 'student' : 'teacher'));
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if(!formData.id || !formData.fname || !formData.lname) return showToast('กรุณากรอกข้อมูลให้ครบถ้วน', 'error');
     let newUsers = [...db.users];
     const roleName = activeTab === 'students' ? 'student' : 'teacher';
-    if (editingUser) {
+    const isEdit = !!editingUser;
+    if (isEdit) {
       newUsers = newUsers.map(u => u.id === editingUser.id ? { ...u, ...formData, role: roleName } : u);
-      showToast('อัปเดตข้อมูลสำเร็จ');
     } else {
       if (newUsers.find(u => u.id === formData.id)) return showToast('รหัสนี้มีในระบบแล้ว', 'error');
       newUsers.push({ ...formData, role: roleName });
-      showToast('เพิ่มผู้ใช้งานสำเร็จ');
     }
-    handleUpdate('users', newUsers);
+    const ok = await handleUpdate('users', newUsers);
+    if (!ok) return;
+    showToast(isEdit ? 'อัปเดตข้อมูลสำเร็จ' : `เพิ่ม${roleName === 'teacher' ? 'อาจารย์' : 'นักศึกษา'}และสร้างบัญชีเข้าสู่ระบบสำเร็จ`);
     setIsModalOpen(false);
   };
 
@@ -134,7 +135,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
 
   const openModal = (user = null) => {
     setEditingUser(user);
-    setFormData(user || { id: '', title: activeTab === 'teachers' ? 'ครู' : 'นาย', fname: '', lname: '', level: LEVELS[0], room: ROOMS[0] });
+    setFormData(user || { id: '', title: activeTab === 'teachers' ? 'อาจารย์' : 'นาย', fname: '', lname: '', level: LEVELS[0], room: ROOMS[0] });
     setIsModalOpen(true);
   };
 
@@ -142,7 +143,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
     const BOM = "\uFEFF";
     const header = activeTab === 'students'
       ? "id,title,fname,lname,level,room\n66001,นาย,สมชาย,ใจดี,ปวช. 1,1"
-      : "id,title,fname,lname\nT001,ครู,สมศรี,สอนดี";
+      : "id,title,fname,lname\nT001,อาจารย์,สมศรี,สอนดี";
     const blob = new Blob([BOM + header], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
@@ -226,7 +227,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
   const tabs = [
     ['dashboard', <LayoutDashboard size={16}/>, 'ภาพรวม'],
     ['students', <GraduationCap size={16}/>, 'นักศึกษา'],
-    ['teachers', <School size={16}/>, 'ครูผู้ควบคุม'],
+    ['teachers', <School size={16}/>, 'อาจารย์ผู้ควบคุม'],
     ['catalogs', <Settings size={16}/>, 'คลังระดับชั้น/ห้อง'],
     ['projects', <FolderKanban size={16}/>, 'จัดการโครงงาน']
   ];
@@ -245,7 +246,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
       {activeTab === 'dashboard' && <div className="space-y-6">
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <Card><p className="text-xs text-gray-500">นักศึกษาทั้งหมด</p><p className="text-3xl font-bold mt-2">{students.length}</p></Card>
-          <Card><p className="text-xs text-gray-500">ครูผู้ควบคุม</p><p className="text-3xl font-bold mt-2">{teachers.length}</p></Card>
+          <Card><p className="text-xs text-gray-500">อาจารย์ผู้ควบคุม</p><p className="text-3xl font-bold mt-2">{teachers.length}</p></Card>
           <Card><p className="text-xs text-gray-500">กลุ่มโครงงาน</p><p className="text-3xl font-bold mt-2">{db.groups.length}</p></Card>
           <Card><p className="text-xs text-gray-500">ความคืบหน้าเฉลี่ย</p><p className="text-3xl font-bold mt-2">{avgProgress.toFixed(0)}%</p></Card>
         </div>
@@ -257,14 +258,14 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
 
       {isUserTab && <div className="space-y-4">
         <div className="flex flex-col sm:flex-row justify-between gap-3">
-          <div><h3 className="text-lg font-bold">{activeTab==='students'?'ข้อมูลนักศึกษา':'ข้อมูลครู'}</h3><p className="text-xs text-gray-500">เพิ่ม แก้ไข ลบ หรือนำเข้าด้วย CSV</p></div>
+          <div><h3 className="text-lg font-bold">{activeTab==='students'?'ข้อมูลนักศึกษา':'ข้อมูลอาจารย์'}</h3><p className="text-xs text-gray-500">เพิ่ม แก้ไข ลบ หรือนำเข้าด้วย CSV</p></div>
           <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={downloadCSVTemplate}><Download size={16}/> ตัวอย่าง CSV</Button><input type="file" accept=".csv,text/csv" ref={fileInputRef} className="hidden" onChange={handleFileUpload}/><Button variant="secondary" onClick={()=>fileInputRef.current?.click()}><Upload size={16}/> นำเข้า CSV</Button><Button onClick={()=>openModal()}><Plus size={16}/> เพิ่ม</Button></div>
         </div>
-        <Card className="overflow-x-auto"><table className="w-full text-sm min-w-[600px]"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left p-3">รหัส</th><th className="text-left p-3">ชื่อ-สกุล</th>{activeTab==='students'&&<th className="text-left p-3">ระดับชั้น / ห้อง</th>}<th className="text-right p-3">จัดการ</th></tr></thead><tbody>{filteredUsers.map(user=><tr key={user.id} className="border-t hover:bg-gray-50"><td className="p-3 font-medium">{user.id}</td><td className="p-3">{user.title}{user.fname} {user.lname}</td>{activeTab==='students'&&<td className="p-3">{user.level} / {user.room}</td>}<td className="p-3"><div className="flex justify-end gap-1"><button onClick={()=>openModal(user)} className="p-2 text-blue-600 hover:bg-blue-50 rounded"><Edit2 size={16}/></button><button onClick={()=>handleDelete(user.id)} className="p-2 text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div></td></tr>)}{!filteredUsers.length&&<tr><td colSpan={4} className="p-8 text-center text-gray-400">ยังไม่มีข้อมูล</td></tr>}</tbody></table></Card>
+        <Card className="overflow-x-auto"><table className="w-full text-sm min-w-[600px]"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left p-3">รหัส</th><th className="text-left p-3">ชื่อ-สกุล</th>{activeTab==='students'&&<th className="text-left p-3">ระดับชั้น / ห้อง</th>}<th className="text-right p-3">จัดการ</th></tr></thead><tbody>{filteredUsers.map(user=><tr key={user.id} className="border-t hover:bg-gray-50"><td className="p-3 font-medium">{user.id}</td><td className="p-3">{user.title}{user.fname} {user.lname}</td>{activeTab==='students'&&<td className="p-3">{user.level} / {user.room}</td>}<td className="p-3"><div className="flex justify-end gap-1"><button title="ตรวจ/สร้างบัญชีเข้าสู่ระบบ" onClick={()=>repairUserLogin(user)} className="p-2 text-green-600 hover:bg-green-50 rounded"><ShieldCheck size={16}/></button><button onClick={()=>openModal(user)} className="p-2 text-blue-600 hover:bg-blue-50 rounded"><Edit2 size={16}/></button><button onClick={()=>handleDelete(user.id)} className="p-2 text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div></td></tr>)}{!filteredUsers.length&&<tr><td colSpan={4} className="p-8 text-center text-gray-400">ยังไม่มีข้อมูล</td></tr>}</tbody></table></Card>
       </div>}
 
       {activeTab === 'catalogs' && <div className="grid md:grid-cols-2 gap-6">
-        <Card><div className="flex justify-between items-center mb-4"><div><h3 className="font-bold">คลังระดับชั้น</h3><p className="text-xs text-gray-500">ครูจะเลือกได้จากรายการนี้เท่านั้น</p></div><Button onClick={()=>addCatalog('levels','ระดับชั้น')}><Plus size={16}/> เพิ่ม</Button></div><div className="space-y-2">{LEVELS.map(v=><div key={v} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg"><span className="font-medium">{v}</span><button onClick={()=>removeCatalog('levels',v,'ระดับชั้น')} className="p-1.5 text-red-500 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div>)}</div></Card>
+        <Card><div className="flex justify-between items-center mb-4"><div><h3 className="font-bold">คลังระดับชั้น</h3><p className="text-xs text-gray-500">อาจารย์จะเลือกได้จากรายการนี้เท่านั้น</p></div><Button onClick={()=>addCatalog('levels','ระดับชั้น')}><Plus size={16}/> เพิ่ม</Button></div><div className="space-y-2">{LEVELS.map(v=><div key={v} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg"><span className="font-medium">{v}</span><button onClick={()=>removeCatalog('levels',v,'ระดับชั้น')} className="p-1.5 text-red-500 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div>)}</div></Card>
         <Card><div className="flex justify-between items-center mb-4"><div><h3 className="font-bold">คลังห้อง</h3><p className="text-xs text-gray-500">เพิ่มหรือลบห้องเรียนได้จากที่นี่</p></div><Button onClick={()=>addCatalog('rooms','ห้อง')}><Plus size={16}/> เพิ่ม</Button></div><div className="space-y-2">{ROOMS.map(v=><div key={v} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg"><span className="font-medium">ห้อง {v}</span><button onClick={()=>removeCatalog('rooms',v,'ห้อง')} className="p-1.5 text-red-500 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div>)}</div></Card>
       </div>}
 
@@ -273,7 +274,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
       <Modal isOpen={isModalOpen} onClose={()=>setIsModalOpen(false)} title={editingUser?'แก้ไขข้อมูล':'เพิ่มข้อมูลใหม่'}>
         <div className="space-y-4">
           <Input label="รหัส (ใช้ Login)" value={formData.id} onChange={e=>setFormData({...formData,id:e.target.value.trim()})} disabled={!!editingUser}/>
-          <div className="grid grid-cols-3 gap-3"><Select label="คำนำหน้า" value={formData.title} onChange={e=>setFormData({...formData,title:e.target.value})} options={['นาย','นางสาว','นาง','ครู','ดร.','ผศ.','รศ.']}/><div className="col-span-2"><Input label="ชื่อ" value={formData.fname} onChange={e=>setFormData({...formData,fname:e.target.value})}/></div></div>
+          <div className="grid grid-cols-3 gap-3"><Select label="คำนำหน้า" value={formData.title} onChange={e=>setFormData({...formData,title:e.target.value})} options={['นาย','นางสาว','นาง','อาจารย์','ดร.','ผศ.','รศ.']}/><div className="col-span-2"><Input label="ชื่อ" value={formData.fname} onChange={e=>setFormData({...formData,fname:e.target.value})}/></div></div>
           <Input label="นามสกุล" value={formData.lname} onChange={e=>setFormData({...formData,lname:e.target.value})}/>
           {activeTab==='students'&&<div className="grid grid-cols-2 gap-3"><Select label="ระดับชั้น" value={formData.level} onChange={e=>setFormData({...formData,level:e.target.value})} options={LEVELS}/><Select label="ห้อง" value={formData.room} onChange={e=>setFormData({...formData,room:e.target.value})} options={ROOMS}/></div>}
           <div className="flex justify-end gap-2 pt-3"><Button variant="secondary" onClick={()=>setIsModalOpen(false)}>ยกเลิก</Button><Button onClick={handleSave}>บันทึก</Button></div>
@@ -304,7 +305,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   const handleSaveGroup = () => {
     if(!groupForm.name) return showToast('กรุณากรอกชื่อกลุ่ม', 'error');
     if(groupForm.members.length > 6) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 6 คน', 'error');
-    if(adminMode && !groupForm.teacherId) return showToast('กรุณาเลือกครูผู้ควบคุม', 'error');
+    if(adminMode && !groupForm.teacherId) return showToast('กรุณาเลือกอาจารย์ผู้ควบคุม', 'error');
     let newGroups = [...db.groups];
     if (groupForm.id) {
       newGroups = newGroups.map(g => g.id === groupForm.id ? groupForm : g);
@@ -530,7 +531,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
       <Modal isOpen={isGroupModalOpen} onClose={() => setIsGroupModalOpen(false)} title={groupForm.id ? 'แก้ไขกลุ่ม' : 'สร้างกลุ่มโครงงาน'}>
         <div className="space-y-4">
           <Input label="ชื่อกลุ่มโครงงาน / หัวข้อที่รับผิดชอบ" value={groupForm.name} onChange={e => setGroupForm({...groupForm, name: e.target.value})} placeholder="เช่น โครงงานระบบร้านค้า (ส่วน Frontend)" />
-          {adminMode && <Select label="ครูผู้ควบคุม" value={groupForm.teacherId || ''} onChange={e => setGroupForm({...groupForm, teacherId:e.target.value})} options={db.users.filter(u=>u.role==='teacher').map(t=>({value:t.id,label:`${t.title}${t.fname} ${t.lname} (${t.id})`}))} placeholder="เลือกครูผู้ควบคุม" />}
+          {adminMode && <Select label="อาจารย์ผู้ควบคุม" value={groupForm.teacherId || ''} onChange={e => setGroupForm({...groupForm, teacherId:e.target.value})} options={db.users.filter(u=>u.role==='teacher').map(t=>({value:t.id,label:`${t.title}${t.fname} ${t.lname} (${t.id})`}))} placeholder="เลือกอาจารย์ผู้ควบคุม" />}
           <div className="grid grid-cols-2 gap-4">
             <Select label="ระดับชั้น" value={groupForm.level} onChange={e => setGroupForm({...groupForm, level: e.target.value, members: []})} options={LEVELS} />
             <Select label="ห้อง" value={groupForm.room} onChange={e => setGroupForm({...groupForm, room: e.target.value, members: []})} options={ROOMS} />
@@ -679,7 +680,7 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
                        <AlertCircle className="text-red-500 flex-shrink-0 mt-0.5" size={20}/>
                        <div>
                          <p className="text-sm font-bold text-red-700">⚠️ แจ้งเตือนสิทธิ์สอบนำเสนอ</p>
-                         <p className="text-xs text-red-600 mt-1">มีบางรายวิชา ยังไม่ผ่านการอนุมัติ ซึ่งอาจส่งผลให้ หมดสิทธิ์สอบนำเสนอ กรุณาติดต่อครูผู้สอนโดยเร็วเพื่อดำเนินการให้เรียบร้อย</p>
+                         <p className="text-xs text-red-600 mt-1">มีบางรายวิชา ยังไม่ผ่านการอนุมัติ ซึ่งอาจส่งผลให้ หมดสิทธิ์สอบนำเสนอ กรุณาติดต่ออาจารย์ผู้สอนโดยเร็วเพื่อดำเนินการให้เรียบร้อย</p>
                        </div>
                     </div>
                  ) : (overallProgress === 100 ? (
@@ -697,7 +698,7 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
             </div>
           </Card>
 
-          <h3 className="text-lg font-bold text-gray-700 pt-4 px-2">แยกตามรายวิชา / ครูผู้ควบคุม</h3>
+          <h3 className="text-lg font-bold text-gray-700 pt-4 px-2">แยกตามรายวิชา / อาจารย์ผู้ควบคุม</h3>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {myProjects.map(group => {
               const prog = calculateGroupProgress(group.milestones);
@@ -738,7 +739,7 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
                            {m.status === 'pending' && <span className="text-gray-400">รอตรวจ</span>}
                         </div>
                       </div>
-                    )) : <p className="text-sm text-gray-400 text-center py-2">ครูยังไม่ได้กำหนดรายการประเมิน</p>}
+                    )) : <p className="text-sm text-gray-400 text-center py-2">อาจารย์ยังไม่ได้กำหนดรายการประเมิน</p>}
                   </div>
 
                   {!isParent && (
@@ -768,7 +769,7 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
         <Card className="text-center py-16">
           <Users size={48} className="mx-auto text-gray-300 mb-4"/>
           <h3 className="text-xl font-semibold text-gray-700">ยังไม่มีกลุ่มโครงงาน</h3>
-          <p className="text-gray-500 mt-2">ระบบบูรณาการยังไม่ได้จัดสรรกลุ่มให้คุณ โปรดรอคุณครูผู้ควบคุมดำเนินการ</p>
+          <p className="text-gray-500 mt-2">ระบบบูรณาการยังไม่ได้จัดสรรกลุ่มให้คุณ โปรดรออาจารย์ผู้ควบคุมดำเนินการ</p>
         </Card>
       )}
     </div>
@@ -812,7 +813,7 @@ export default function App() {
     publicGroups.forEach(g => {
       if (g.teacherId && !teacherStubs.some(t => t.id === g.teacherId)) {
         const parts = String(g.teacherName || '').split(' ');
-        teacherStubs.push({ id: g.teacherId, role: 'teacher', title: '', fname: parts[0] || 'ครูผู้ควบคุม', lname: parts.slice(1).join(' ') || '' });
+        teacherStubs.push({ id: g.teacherId, role: 'teacher', title: '', fname: parts[0] || 'อาจารย์ผู้ควบคุม', lname: parts.slice(1).join(' ') || '' });
       }
     });
     setDb(prev => ({
@@ -869,7 +870,7 @@ export default function App() {
     const own = { ...ownSnap.data(), uid: firebaseUser.uid };
     const groupsRaw = await getDocsArray('groups', query(collection(firestore, 'groups'), where('memberUids', 'array-contains', firebaseUser.uid)));
     const submissionsRaw = await getDocsArray('submissions', query(collection(firestore, 'submissions'), where('studentUid', '==', firebaseUser.uid)));
-    const teachers = groupsRaw.map(g => ({ id: g.teacherId, role: 'teacher', title: '', fname: g.teacherName || 'ครูผู้ควบคุม', lname: '' })).filter((v,i,a) => v.id && a.findIndex(x => x.id === v.id) === i);
+    const teachers = groupsRaw.map(g => ({ id: g.teacherId, role: 'teacher', title: '', fname: g.teacherName || 'อาจารย์ผู้ควบคุม', lname: '' })).filter((v,i,a) => v.id && a.findIndex(x => x.id === v.id) === i);
     const catSnap = await getDoc(doc(firestore, 'catalogs', 'default'));
     setDb({ users: [own, ...teachers], groups: groupsRaw, templates: [], submissions: submissionsRaw, catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS } });
     return own;
@@ -903,6 +904,52 @@ export default function App() {
     return getAuth(app);
   };
 
+  const ensureLoginAccount = async (u) => {
+    const creatorAuth = ensureCreatorAuth();
+    const email = emailFor(u.role, u.id);
+    const password = defaultPasswordFor(u.id);
+    try {
+      try {
+        const signed = await signInWithEmailAndPassword(creatorAuth, email, password);
+        return signed.user.uid;
+      } catch (_) {
+        try {
+          const created = await createUserWithEmailAndPassword(creatorAuth, email, password);
+          return created.user.uid;
+        } catch (createErr) {
+          if (createErr?.code === 'auth/email-already-in-use') {
+            throw new Error(`บัญชีรหัส ${u.id} มีอยู่ใน Firebase Authentication แล้ว แต่รหัสผ่านไม่ตรงกับรหัสเริ่มต้น กรุณาลบบัญชีเดิมใน Authentication แล้วกดปุ่มตรวจบัญชีอีกครั้ง`);
+          }
+          throw createErr;
+        }
+      }
+    } finally {
+      try { await signOut(creatorAuth); } catch (_) {}
+    }
+  };
+
+  const repairUserLogin = async (u) => {
+    try {
+      setLoading(true);
+      const uid = await ensureLoginAccount(u);
+      const oldUid = u.uid || u._docId;
+      const profile = { ...clean(u), uid, email: emailFor(u.role, u.id), active: true, updatedAt: Date.now() };
+      delete profile._docId;
+      await setDoc(doc(firestore, 'users', uid), profile, { merge: true });
+      if (oldUid && oldUid !== uid) {
+        try { await deleteDoc(doc(firestore, 'users', oldUid)); } catch (_) {}
+      }
+      if (u.role === 'student') await setDoc(doc(firestore, 'publicStudents', u.id), { id:u.id, title:u.title||'', fname:u.fname||'', lname:u.lname||'', level:u.level||'', room:u.room||'', role:'student' });
+      await loadPrivate(auth.currentUser, 'admin');
+      showToast(`บัญชีเข้าสู่ระบบรหัส ${u.id} พร้อมใช้งานแล้ว`);
+    } catch (err) {
+      console.error(err);
+      showToast(`ตรวจบัญชีไม่สำเร็จ: ${err?.message || err}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const syncUsers = async nextUsers => {
     const prev = db.users.filter(u => ['student','teacher'].includes(u.role));
     const next = nextUsers.filter(u => ['student','teacher'].includes(u.role));
@@ -914,15 +961,7 @@ export default function App() {
         const existing = await getDocs(query(collection(firestore, 'users'), where('id', '==', u.id)));
         if (!existing.empty) uid = existing.docs[0].id;
       }
-      if (!uid) {
-        const creatorAuth = ensureCreatorAuth();
-        try {
-          const cred = await createUserWithEmailAndPassword(creatorAuth, emailFor(u.role, u.id), defaultPasswordFor(u.id));
-          uid = cred.user.uid;
-        } finally {
-          try { await signOut(creatorAuth); } catch (_) {}
-        }
-      }
+      if (!uid) uid = await ensureLoginAccount(u);
       const profile = { ...clean(u), uid, email: emailFor(u.role, u.id), active: true, updatedAt: Date.now() };
       delete profile._docId;
       await setDoc(doc(firestore, 'users', uid), profile, { merge: true });
@@ -963,26 +1002,26 @@ export default function App() {
     for (const id of prevIds) if (!nextIds.has(id)) await deleteDoc(doc(firestore, name, id));
   };
 
-  const handleUpdate = (collectionKey, newData) => {
+  const handleUpdate = async (collectionKey, newData) => {
     const previous = db[collectionKey];
     setDb(prev => ({ ...prev, [collectionKey]: newData }));
-    (async () => {
-      try {
-        if (collectionKey === 'catalogs') await setDoc(doc(firestore, 'catalogs', 'default'), clean(newData));
-        else if (collectionKey === 'users') await syncUsers(newData);
-        else if (collectionKey === 'groups') await syncGroups(newData);
-        else if (collectionKey === 'templates') await syncSimpleCollection('templates', db.templates, newData);
-        else if (collectionKey === 'submissions') await syncSimpleCollection('submissions', db.submissions, newData);
-        if (auth.currentUser && role && role !== 'parent') {
-          const refreshed = await loadPrivate(auth.currentUser, role);
-          if (refreshed && refreshed.uid === currentUser?.uid) setCurrentUser(refreshed);
-        } else await loadPublic();
-      } catch (err) {
-        console.error(err);
-        setDb(prev => ({ ...prev, [collectionKey]: previous }));
-        showToast(`บันทึกไม่สำเร็จ: ${err?.message || err}`, 'error');
-      }
-    })();
+    try {
+      if (collectionKey === 'catalogs') await setDoc(doc(firestore, 'catalogs', 'default'), clean(newData));
+      else if (collectionKey === 'users') await syncUsers(newData);
+      else if (collectionKey === 'groups') await syncGroups(newData);
+      else if (collectionKey === 'templates') await syncSimpleCollection('templates', db.templates, newData);
+      else if (collectionKey === 'submissions') await syncSimpleCollection('submissions', db.submissions, newData);
+      if (auth.currentUser && role && role !== 'parent') {
+        const refreshed = await loadPrivate(auth.currentUser, role);
+        if (refreshed && refreshed.uid === currentUser?.uid) setCurrentUser(refreshed);
+      } else await loadPublic();
+      return true;
+    } catch (err) {
+      console.error(err);
+      setDb(prev => ({ ...prev, [collectionKey]: previous }));
+      showToast(`บันทึกไม่สำเร็จ: ${err?.message || err}`, 'error');
+      return false;
+    }
   };
 
   const handleLogin = async e => {
@@ -1032,13 +1071,13 @@ export default function App() {
               <div className="space-y-3">
                 <h2 className="text-center font-medium text-gray-500 mb-6">เลือกสถานะเพื่อเข้าใช้งาน</h2>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('student')}><UserCircle className="text-blue-500"/> นักศึกษา (Student)</Button>
-                <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('teacher')}><CheckCircle className="text-green-500"/> ผู้ควบคุม (Teacher)</Button>
+                <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('teacher')}><CheckCircle className="text-green-500"/> อาจารย์ผู้ควบคุม (Teacher)</Button>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('parent')}><Search className="text-amber-500"/> ผู้เข้าชม (Parent)</Button>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('admin')}><Settings className="text-gray-500"/> ผู้จัดการระบบ (Admin)</Button>
               </div>
             ) : (
               <form onSubmit={handleLogin} className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <div className="flex items-center gap-2 text-blue-600 font-semibold mb-2"><button type="button" onClick={() => setRole(null)} className="p-1 hover:bg-blue-50 rounded"><ChevronRight className="rotate-180" size={18}/></button>เข้าสู่ระบบในฐานะ {role === 'student' ? 'นักศึกษา' : role === 'teacher' ? 'ผู้ควบคุม' : role === 'admin' ? 'ผู้จัดการระบบ' : 'ผู้เข้าชม'}</div>
+                <div className="flex items-center gap-2 text-blue-600 font-semibold mb-2"><button type="button" onClick={() => setRole(null)} className="p-1 hover:bg-blue-50 rounded"><ChevronRight className="rotate-180" size={18}/></button>เข้าสู่ระบบในฐานะ {role === 'student' ? 'นักศึกษา' : role === 'teacher' ? 'อาจารย์ผู้ควบคุม' : role === 'admin' ? 'ผู้จัดการระบบ' : 'ผู้เข้าชม'}</div>
                 {role === 'parent' ? <Input label="ค้นหานักศึกษา" placeholder="กรอกรหัสนักศึกษา หรือ ชื่อ..." required value={searchQuery} onChange={e => setSearchQuery(e.target.value)}/> : <Input label="รหัสผู้ใช้งาน" placeholder="กรอกรหัส..." required value={loginId} onChange={e => setLoginId(e.target.value)}/>} 
                 {role === 'admin' && <Input label="รหัสผ่าน Admin" type="password" placeholder="รหัสผ่านที่สร้างใน Firebase" required value={loginPassword} onChange={e => setLoginPassword(e.target.value)}/>} 
                 <Button type="submit" className="w-full mt-4">เข้าสู่ระบบ</Button>
@@ -1056,7 +1095,7 @@ export default function App() {
     <div className="min-h-screen bg-gray-50/50 font-sans text-gray-900 flex flex-col relative">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-40 shadow-sm"><div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between"><div className="flex items-center gap-3"><div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold">D</div><h1 className="font-bold text-lg hidden sm:block">DMD Project Tracking</h1></div><div className="flex items-center gap-4"><div className="text-right hidden md:block"><p className="text-sm font-semibold">{currentUser.title}{currentUser.fname} {currentUser.lname}</p><p className="text-xs text-gray-500 capitalize">{role}</p></div><button onClick={logout} className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg flex items-center gap-2 text-sm font-medium"><LogOut size={18}/> <span className="hidden sm:inline">ออกจากระบบ</span></button></div></div></header>
       <main className="flex-grow w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 animate-in fade-in duration-500">
-        {role === 'admin' && <AdminView db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt} currentUser={currentUser}/>} 
+        {role === 'admin' && <AdminView db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt} currentUser={currentUser} repairUserLogin={repairUserLogin}/>} 
         {role === 'teacher' && <TeacherView user={currentUser} db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt}/>} 
         {role === 'student' && <ProgressDashboard db={db} targetStudent={currentUser} isParent={false} handleUpdate={handleUpdate} showToast={showToast} askPrompt={askPrompt}/>} 
         {role === 'parent' && <ProgressDashboard db={db} targetStudent={currentUser} isParent={true}/>} 
