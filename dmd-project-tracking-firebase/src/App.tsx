@@ -11,6 +11,7 @@ import {
 
 const DEFAULT_LEVELS = ['ปวช. 1', 'ปวช. 2', 'ปวช. 3', 'ปวส. 1', 'ปวส. 2'];
 const DEFAULT_ROOMS = ['1', '2', '3', '4'];
+const ADMIN_PASSWORD = '995622';
 
 // --- UTILITIES ---
 const getProgressColor = (percent) => {
@@ -1519,6 +1520,11 @@ export default function App() {
       const user = fresh.users.find(u => u.role === role && String(u.id).trim().toLowerCase() === rawId.toLowerCase());
       if (!user) throw new Error('รหัสผู้ใช้งานไม่ถูกต้อง หรือยังไม่มีรหัสนี้ในระบบ');
 
+      if (role === 'admin') {
+        if (!loginPassword) throw new Error('กรุณากรอกรหัสผ่านผู้จัดการระบบ');
+        if (loginPassword !== ADMIN_PASSWORD) throw new Error('รหัสผ่านผู้จัดการระบบไม่ถูกต้อง');
+      }
+
       if (role === 'teacher') {
         if (!loginPassword) throw new Error('กรุณากรอกรหัสผ่าน');
         if (user.teacherPasswordSet) {
@@ -1588,8 +1594,9 @@ export default function App() {
                   : <Input label="รหัสผู้ใช้งาน" placeholder={role === 'admin' ? 'กรอก admin' : 'กรอกรหัส...'} required value={loginId} onChange={e => setLoginId(e.target.value)}/>
                 }
                 {role === 'teacher' && <Input label="รหัสผ่าน" type="password" placeholder="กรอกรหัสผ่าน หรือรหัสตั้งต้นครั้งแรก" required value={loginPassword} onChange={e=>setLoginPassword(e.target.value)}/>}
+                {role === 'admin' && <Input label="รหัสผ่านผู้จัดการระบบ" type="password" placeholder="กรอกรหัสผ่าน" required value={loginPassword} onChange={e=>setLoginPassword(e.target.value)}/>}
                 <Button type="submit" className="w-full mt-4">เข้าสู่ระบบ</Button>
-                <div className="text-xs text-gray-400 mt-6 pt-4 border-t text-center flex flex-col gap-1 items-center justify-center"><span className="flex items-center gap-1"><ShieldCheck size={14}/> ระบบพร้อมใช้งาน</span><span>{role === 'admin' ? 'รหัสผู้จัดการระบบ: admin' : role === 'parent' ? 'ค้นหาด้วยรหัสหรือชื่อนักศึกษา' : role === 'teacher' ? 'ใช้รหัสอาจารย์ + รหัสผ่านส่วนตัว' : 'ใช้รหัสประจำตัวเข้าสู่ระบบได้โดยตรง'}</span></div>
+                <div className="text-xs text-gray-400 mt-6 pt-4 border-t text-center flex flex-col gap-1 items-center justify-center"><span className="flex items-center gap-1"><ShieldCheck size={14}/> ระบบพร้อมใช้งาน</span><span>{role === 'admin' ? 'เข้าสู่ระบบด้วยรหัสผู้ใช้ admin และรหัสผ่านผู้จัดการระบบ' : role === 'parent' ? 'ค้นหาด้วยรหัสหรือชื่อนักศึกษา' : role === 'teacher' ? 'ใช้รหัสอาจารย์ + รหัสผ่านส่วนตัว' : 'ใช้รหัสประจำตัวเข้าสู่ระบบได้โดยตรง'}</span></div>
               </form>
             )}
           </div>
