@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { onAuthStateChanged, signInAnonymously, signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from 'firebase/firestore';
 import { auth, db as firestore } from './firebase';
 import { 
@@ -1053,9 +1053,6 @@ export default function App() {
   const clean = value => JSON.parse(JSON.stringify(value ?? null));
   const loginKey = value => Array.from(String(value || '').trim().toLowerCase()).map(ch => /[a-z0-9]/.test(ch) ? ch : `x${ch.codePointAt(0).toString(16)}`).join('');
   const loginDocId = (userRole, id) => `${userRole}_${loginKey(id)}`;
-  const AUTH_VERSION = 'v5';
-  const authEmailFor = (userRole, id) => `${AUTH_VERSION}.${userRole}.${loginKey(id)}@dmd.example.com`;
-  const authPasswordFor = (userRole, id) => `DMD#${userRole === 'teacher' ? 'T' : 'S'}#${loginKey(id)}#2026!`;
   const ADMIN_EMAIL = 'admin@dmd.example.com';
 
   const getDocsArray = async (name, qRef = null) => {
@@ -1169,7 +1166,7 @@ export default function App() {
           if (!cancelled && loaded) { setRole('admin'); setCurrentUser(loaded); }
           return;
         }
-        if (firebaseUser.email && firebaseUser.email.startsWith(`${AUTH_VERSION}.`)) {
+        if (firebaseUser.isAnonymous) {
           const profile = await getAuthProfile(firebaseUser.uid);
           if (!profile || !['student','teacher'].includes(profile.role)) return;
           const loaded = await loadPrivate(firebaseUser, profile.role, profile);
@@ -1196,7 +1193,6 @@ export default function App() {
         id: normalizedId,
         role: u.role,
         userDocId: u._docId,
-        authEmail: authEmailFor(u.role, normalizedId),
         active: true,
         updatedAt: Date.now()
       });
@@ -1254,7 +1250,7 @@ export default function App() {
       delete profile.email;
       await setDoc(doc(firestore, 'users', docId), profile, { merge: true });
       const key = loginDocId(u.role, u.id);
-      await setDoc(doc(firestore, 'loginIndex', key), { loginKey:key, id:String(u.id), role:u.role, userDocId:docId, authEmail:authEmailFor(u.role, u.id), active:true, updatedAt:Date.now() });
+      await setDoc(doc(firestore, 'loginIndex', key), { loginKey:key, id:String(u.id), role:u.role, userDocId:docId, active:true, updatedAt:Date.now() });
       if (u.role === 'student') {
         await setDoc(doc(firestore, 'publicStudents', String(u.id)), { id:String(u.id), title:u.title||'', fname:u.fname||'', lname:u.lname||'', level:u.level||'', room:u.room||'', role:'student' });
       }
@@ -1404,27 +1400,14 @@ export default function App() {
       const indexData = indexSnap.data();
       if (indexData.active === false || indexData.role !== role || String(indexData.id) !== rawId || !indexData.userDocId) throw new Error('รหัสนี้ไม่สามารถเข้าใช้งานได้');
 
-      const email = indexData.authEmail || authEmailFor(role, rawId);
-      const password = authPasswordFor(role, rawId);
-      if (auth.currentUser) {
+      if (auth.currentUser && !auth.currentUser.isAnonymous) {
         try { await signOut(auth); } catch (_) {}
       }
 
-      let cred;
-      try {
-        cred = await signInWithEmailAndPassword(auth, email, password);
-      } catch (signInErr) {
-        const recoverable = ['auth/invalid-credential', 'auth/user-not-found', 'auth/wrong-password', 'auth/invalid-login-credentials'].includes(signInErr?.code);
-        if (!recoverable) throw signInErr;
-        try {
-          cred = await createUserWithEmailAndPassword(auth, email, password);
-        } catch (createErr) {
-          if (createErr?.code === 'auth/email-already-in-use') {
-            cred = await signInWithEmailAndPassword(auth, email, password);
-          } else {
-            throw createErr;
-          }
-        }
+      let firebaseUser = auth.currentUser;
+      if (!firebaseUser || !firebaseUser.isAnonymous) {
+        const cred = await signInAnonymously(auth);
+        firebaseUser = cred.user;
       }
 
       const profile = {
@@ -1432,12 +1415,11 @@ export default function App() {
         id: rawId,
         role,
         userDocId: indexData.userDocId,
-        authEmail: email,
         active: true,
         updatedAt: Date.now()
       };
-      await setDoc(doc(firestore, 'authProfiles', cred.user.uid), profile, { merge: true });
-      const loaded = await loadPrivate(cred.user, role, profile);
+      await setDoc(doc(firestore, 'authProfiles', firebaseUser.uid), profile, { merge: true });
+      const loaded = await loadPrivate(firebaseUser, role, profile);
       if (!loaded) throw new Error('ไม่พบข้อมูลผู้ใช้งาน');
       setCurrentUser(loaded);
       showToast(`เข้าสู่ระบบสำเร็จ ยินดีต้อนรับ ${loaded.fname || ''}`);
@@ -1452,7 +1434,11 @@ export default function App() {
 
   const logout = async () => {
     try {
-      await signOut(auth);
+      if (auth.currentUser?.isAnonymous) {
+        try { await deleteDoc(doc(firestore, 'authProfiles', auth.currentUser.uid)); } catch (_) {}
+      } else if (auth.currentUser) {
+        await signOut(auth);
+      }
     } catch (_) {}
     setCurrentUser(null); setRole(null); setLoginId(''); setLoginPassword(''); setSearchQuery('');
     await loadPublic();
