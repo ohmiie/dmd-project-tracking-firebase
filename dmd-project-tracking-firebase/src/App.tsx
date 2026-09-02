@@ -49,6 +49,13 @@ const generateTeacherSetupCode = () => {
   return String(100000 + (n[0] % 900000));
 };
 
+const makeEntityId = (prefix) => {
+  if (window.crypto?.randomUUID) return `${prefix}_${window.crypto.randomUUID()}`;
+  const bytes = new Uint8Array(12);
+  window.crypto.getRandomValues(bytes);
+  return `${prefix}_${Date.now()}_${Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')}`;
+};
+
 const toDateInputValue = (date = new Date()) => {
   const d = new Date(date);
   const y = d.getFullYear();
@@ -312,30 +319,61 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (evt) => {
-      const text = String(evt.target?.result || '').replace(/^\uFEFF/, '');
-      const lines = text.split(/\r?\n/).filter(Boolean);
-      const imported = [];
-      const roleName = activeTab === 'students' ? 'student' : 'teacher';
-      for (let i = 1; i < lines.length; i++) {
-        const cols = parseCSVLine(lines[i]);
-        if (cols.length < 4 || !cols[0]) continue;
-        const user = { id: cols[0], role: roleName, title: cols[1] || '', fname: cols[2] || '', lname: cols[3] || '' };
-        if (roleName === 'student') {
-          user.level = cols[4] || LEVELS[0];
-          user.room = cols[5] || ROOMS[0];
+    reader.onload = async (evt) => {
+      try {
+        const text = String(evt.target?.result || '').replace(/^\uFEFF/, '');
+        const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+        const roleName = activeTab === 'students' ? 'student' : 'teacher';
+        const importedMap = new Map();
+        let invalidRows = 0;
+        let duplicateRows = 0;
+
+        for (let i = 1; i < lines.length; i++) {
+          const cols = parseCSVLine(lines[i]);
+          const id = String(cols[0] || '').trim();
+          if (cols.length < 4 || !id) { invalidRows++; continue; }
+          const user = {
+            id,
+            role: roleName,
+            title: String(cols[1] || '').trim(),
+            fname: String(cols[2] || '').trim(),
+            lname: String(cols[3] || '').trim()
+          };
+          if (roleName === 'student') {
+            user.level = String(cols[4] || LEVELS[0]).trim();
+            user.room = String(cols[5] || ROOMS[0]).trim();
+          }
+          const key = `${roleName}:${id.toLowerCase()}`;
+          if (importedMap.has(key)) duplicateRows++;
+          importedMap.set(key, user);
         }
-        imported.push(user);
+
+        const imported = [...importedMap.values()];
+        if (!imported.length) return showToast('ไม่พบข้อมูลที่ถูกต้องในไฟล์ CSV', 'error');
+
+        const mergedImported = imported.map(n => {
+          const old = db.users.find(u => u.role === n.role && String(u.id).trim().toLowerCase() === String(n.id).trim().toLowerCase());
+          return old ? { ...old, ...n } : n;
+        });
+        const oldWithoutDup = db.users.filter(u => !mergedImported.some(n => n.role === u.role && String(n.id).trim().toLowerCase() === String(u.id).trim().toLowerCase()));
+        const nextUsers = [...oldWithoutDup, ...mergedImported];
+        const ok = await handleUpdate('users', nextUsers);
+        if (!ok) return;
+
+        const roleCount = nextUsers.filter(u => u.role === roleName).length;
+        const detail = [
+          `นำเข้าสำเร็จ ${imported.length} คน`,
+          duplicateRows ? `ตัดรหัสซ้ำในไฟล์ ${duplicateRows} แถว` : '',
+          invalidRows ? `ข้ามข้อมูลไม่สมบูรณ์ ${invalidRows} แถว` : '',
+          `ยอด${roleName === 'student' ? 'นักศึกษา' : 'อาจารย์'}หลังนำเข้า ${roleCount} คน`
+        ].filter(Boolean).join(' • ');
+        showToast(detail);
+      } catch (err) {
+        console.error('CSV import', err);
+        showToast(`นำเข้า CSV ไม่สำเร็จ: ${err?.message || err}`, 'error');
+      } finally {
+        e.target.value = '';
       }
-      if (!imported.length) return showToast('ไม่พบข้อมูลที่ถูกต้องในไฟล์ CSV', 'error');
-      const mergedImported = imported.map(n => {
-        const old = db.users.find(u => u.role === n.role && String(u.id) === String(n.id));
-        return old ? { ...old, ...n } : n;
-      });
-      const oldWithoutDup = db.users.filter(u => !mergedImported.some(n => n.role === u.role && String(n.id) === String(u.id)));
-      handleUpdate('users', [...oldWithoutDup, ...mergedImported]);
-      showToast(`นำเข้าข้อมูลสำเร็จ ${imported.length} รายการ`);
-      e.target.value = '';
     };
     reader.readAsText(file);
   };
@@ -460,10 +498,22 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [milestoneDrafts, setMilestoneDrafts] = useState({});
 
   const myGroups = adminMode ? db.groups : db.groups.filter(g => String(g.teacherId ?? '') === String(user.id ?? ''));
   const allTemplates = db.templates || [];
   const activeGroup = myGroups.find(g => g.id === activeGroupId);
+
+  useEffect(() => {
+    if (!activeGroup) {
+      setMilestoneDrafts({});
+      return;
+    }
+    setMilestoneDrafts(Object.fromEntries((activeGroup.milestones || []).map(m => [
+      String(m.id),
+      { desc: String(m.desc || ''), percent: Number(m.percent || 0) }
+    ])));
+  }, [activeGroupId]);
 
   const getTeacherDisplayName = (teacherId) => {
     const teacher = db.users.find(u => u.role === 'teacher' && String(u.id ?? '') === String(teacherId ?? ''));
@@ -529,7 +579,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     if (isEdit) {
       newGroups = newGroups.map(g => g.id === normalizedGroup.id ? normalizedGroup : g);
     } else {
-      nextActiveId = 'g' + Date.now();
+      nextActiveId = makeEntityId('g');
       newGroups.push({ ...normalizedGroup, id: nextActiveId });
     }
 
@@ -550,10 +600,27 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     });
   };
 
-  const updateMilestones = (newMilestones) => {
-    if (!activeGroup) return;
+  const updateMilestones = async (newMilestones) => {
+    if (!activeGroup) return false;
     const updatedGroups = db.groups.map(g => g.id === activeGroup.id ? { ...g, milestones: newMilestones } : g);
-    handleUpdate('groups', updatedGroups);
+    return await handleUpdate('groups', updatedGroups);
+  };
+
+  const milestoneWithDraft = (milestone) => {
+    const draft = milestoneDrafts[String(milestone.id)];
+    if (!draft) return milestone;
+    return {
+      ...milestone,
+      desc: String(draft.desc ?? milestone.desc ?? ''),
+      percent: Number(draft.percent ?? milestone.percent ?? 0)
+    };
+  };
+
+  const saveMilestoneDraft = async (milestoneId) => {
+    if (!activeGroup) return;
+    const updated = activeGroup.milestones.map(m => String(m.id) === String(milestoneId) ? milestoneWithDraft(m) : m);
+    const ok = await updateMilestones(updated);
+    if (ok) showToast('บันทึกรายการประเมินแล้ว');
   };
 
   const autoDistribute = (items) => {
@@ -565,7 +632,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
 
   const addMilestone = () => {
     const newM = {
-      id: 'm' + Date.now(),
+      id: makeEntityId('m'),
       order: activeGroup.milestones.length + 1,
       desc: 'รายการประเมินใหม่',
       percent: 0,
@@ -573,12 +640,13 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
       assignDate: toDateInputValue(),
       dueDate: ''
     };
-    updateMilestones(autoDistribute([...activeGroup.milestones, newM]));
+    updateMilestones(autoDistribute([...activeGroup.milestones.map(milestoneWithDraft), newM]));
   };
 
   const setMilestoneDate = (milestoneId, field, value) => {
-    const current = activeGroup.milestones.find(m => m.id === milestoneId);
-    if (!current) return;
+    const found = activeGroup.milestones.find(m => m.id === milestoneId);
+    if (!found) return;
+    const current = milestoneWithDraft(found);
     const next = { ...current, [field]: value };
 
     if (next.assignDate && next.dueDate) {
@@ -590,27 +658,28 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
       }
     }
 
-    updateMilestones(activeGroup.milestones.map(m => m.id === milestoneId ? next : m));
+    updateMilestones(activeGroup.milestones.map(m => m.id === milestoneId ? next : milestoneWithDraft(m)));
   };
 
   const setMilestoneDuration = (milestoneId, days) => {
-    const current = activeGroup.milestones.find(m => m.id === milestoneId);
-    if (!current) return;
+    const found = activeGroup.milestones.find(m => m.id === milestoneId);
+    if (!found) return;
+    const current = milestoneWithDraft(found);
     const assignDate = current.assignDate || toDateInputValue();
     const dueDate = addDaysToDateInput(assignDate, days);
     updateMilestones(activeGroup.milestones.map(m =>
-      m.id === milestoneId ? { ...m, assignDate, dueDate } : m
+      m.id === milestoneId ? { ...current, assignDate, dueDate } : milestoneWithDraft(m)
     ));
   };
 
   const setMilestoneStatus = (milestoneId, status) => {
-    const updated = activeGroup.milestones.map(m => m.id === milestoneId ? { ...m, status } : m);
+    const updated = activeGroup.milestones.map(m => m.id === milestoneId ? { ...milestoneWithDraft(m), status } : milestoneWithDraft(m));
     updateMilestones(updated);
   };
 
   const deleteMilestone = (milestoneId) => {
     askConfirm('ต้องการลบรายการประเมินนี้หรือไม่?', () => {
-      updateMilestones(autoDistribute(activeGroup.milestones.filter(m => m.id !== milestoneId)));
+      updateMilestones(autoDistribute(activeGroup.milestones.map(milestoneWithDraft).filter(m => m.id !== milestoneId)));
     });
   }
 
@@ -620,10 +689,10 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     askPrompt('กรุณาตั้งชื่อเทมเพลต', async (name) => {
       if(!name) return;
       const newTemplate = {
-        id: 'tpl' + Date.now(),
+        id: makeEntityId('tpl'),
         teacherId: String(adminMode ? activeGroup.teacherId : user.id ?? ''),
         name: name,
-        milestones: activeGroup.milestones.map(m => ({ desc: m.desc, percent: m.percent })) 
+        milestones: activeGroup.milestones.map(milestoneWithDraft).map(m => ({ desc: m.desc, percent: m.percent })) 
       };
       const ok = await handleUpdate('templates', [...(db.templates || []), newTemplate]);
       if (ok) showToast('บันทึกเทมเพลตสำเร็จ');
@@ -636,7 +705,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     
     const applyTpl = () => {
       const appliedMilestones = tpl.milestones.map((m, idx) => ({
-        id: 'm' + Date.now() + idx,
+        id: `${makeEntityId('m')}_${idx}`,
         order: idx + 1,
         desc: m.desc,
         percent: m.percent,
@@ -758,7 +827,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
                 <div className="flex gap-2">
                   <Button onClick={() => setIsTemplateModalOpen(true)} variant="secondary" className="text-sm py-1.5"><Copy size={16}/> เลือกเทมเพลต</Button>
                   <Button onClick={saveAsTemplate} variant="secondary" className="text-sm py-1.5"><Bookmark size={16}/> บันทึกเทมเพลต</Button>
-                  <Button onClick={() => updateMilestones(autoDistribute(activeGroup.milestones))} variant="secondary" className="text-sm py-1.5">จัด % อัตโนมัติ</Button><Button onClick={addMilestone} className="text-sm py-1.5"><Plus size={16}/> เพิ่ม</Button>
+                  <Button onClick={() => updateMilestones(autoDistribute(activeGroup.milestones.map(milestoneWithDraft)))} variant="secondary" className="text-sm py-1.5">จัด % อัตโนมัติ</Button><Button onClick={addMilestone} className="text-sm py-1.5"><Plus size={16}/> เพิ่ม</Button>
                 </div>
               </div>
 
@@ -774,8 +843,8 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
                       <div className="flex-grow w-full flex items-center gap-3">
                         <span className="text-sm font-bold text-gray-400 w-5">{idx + 1}.</span>
                         <input
-                          type="text" value={m.desc} placeholder="รายละเอียด..."
-                          onChange={(e) => updateMilestones(activeGroup.milestones.map(mx => mx.id === m.id ? {...mx, desc: e.target.value} : mx))}
+                          type="text" value={milestoneDrafts[String(m.id)]?.desc ?? m.desc ?? ''} placeholder="รายละเอียด..."
+                          onChange={(e) => setMilestoneDrafts(prev => ({ ...prev, [String(m.id)]: { ...(prev[String(m.id)] || { percent: Number(m.percent || 0) }), desc: e.target.value } }))}
                           className="flex-grow bg-white/70 border border-gray-200 focus:border-blue-500 outline-none rounded-lg px-3 py-2 text-sm font-medium w-full min-w-0"
                         />
                       </div>
@@ -783,12 +852,17 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
                       <div className="flex items-center gap-2 flex-wrap xl:flex-nowrap pl-8 xl:pl-0">
                         <div className="flex items-center">
                           <input
-                            type="number" value={m.percent}
-                            onChange={(e) => updateMilestones(activeGroup.milestones.map(mx => mx.id === m.id ? {...mx, percent: Number(e.target.value)} : mx))}
+                            type="number" value={milestoneDrafts[String(m.id)]?.percent ?? m.percent ?? 0}
+                            onChange={(e) => setMilestoneDrafts(prev => ({ ...prev, [String(m.id)]: { ...(prev[String(m.id)] || { desc: String(m.desc || '') }), percent: Number(e.target.value) } }))}
                             className="w-16 text-center border border-gray-300 rounded-lg py-2 text-sm outline-none focus:border-blue-500 bg-white"
                           />
                           <span className="text-gray-500 ml-1 text-sm">%</span>
                         </div>
+
+                        <button onClick={() => saveMilestoneDraft(m.id)}
+                                className="px-3 py-2 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 flex items-center gap-1">
+                          <Check size={14}/> บันทึก
+                        </button>
 
                         <div className="flex bg-gray-200/50 rounded-lg p-0.5 border border-gray-200">
                           <button onClick={() => setMilestoneStatus(m.id, 'pending')}
@@ -1046,7 +1120,7 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
       if(!url) return;
       if(!url.startsWith('http')) return showToast('รูปแบบ Link ไม่ถูกต้อง (ต้องขึ้นต้นด้วย http)', 'error');
       const submission = {
-        id: 'sub' + Date.now(),
+        id: makeEntityId('sub'),
         groupId,
         studentUid: targetStudent.uid,
         studentId: targetStudent.id,
@@ -1274,6 +1348,9 @@ export default function App() {
 
   const clean = value => JSON.parse(JSON.stringify(value ?? null));
   const safeDocId = value => String(value || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_') || `id_${Date.now()}`;
+  const normalizeUserId = value => String(value ?? '').trim();
+  const logicalUserKey = user => `${String(user?.role || '').trim().toLowerCase()}:${normalizeUserId(user?.id).toLowerCase()}`;
+  const canonicalUserDocId = user => `${String(user?.role || '').trim().toLowerCase()}_${safeDocId(normalizeUserId(user?.id))}`;
 
   const getDocsArray = async name => {
     const snap = await getDocs(collection(firestore, name));
@@ -1327,9 +1404,21 @@ export default function App() {
       getDoc(doc(firestore, 'catalogs', 'default'))
     ]);
 
-    const users = usersRaw
+    // Firestore อาจมีเอกสารเก่าซ้ำจากเวอร์ชันก่อนหน้า แม้จะเป็นรหัสคนเดียวกัน
+    // จึงรวมตาม role + id ก่อนแสดงผล เพื่อให้ยอดนักศึกษา/อาจารย์ตรงกับคนจริง
+    const normalizedUsersRaw = usersRaw
       .filter(u => u.role !== 'disabled' && u.active !== false)
-      .map(u => ({ ...u, id: u.id != null ? String(u.id).trim() : '', uid: u._docId }));
+      .map(u => ({ ...u, id: normalizeUserId(u.id), uid: u._docId }))
+      .filter(u => u.id && u.role)
+      .sort((a, b) => Number(a.updatedAt || a.createdAt || 0) - Number(b.updatedAt || b.createdAt || 0));
+
+    const usersByKey = new Map();
+    for (const u of normalizedUsersRaw) {
+      const key = logicalUserKey(u);
+      const before = usersByKey.get(key);
+      usersByKey.set(key, before ? { ...before, ...u, id: normalizeUserId(u.id), uid: u._docId, _docId: u._docId } : u);
+    }
+    const users = [...usersByKey.values()];
 
     const groups = groupsRaw.map(g => ({
       ...g,
@@ -1380,24 +1469,97 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  const syncUsers = async nextUsers => {
-    const prev = db.users.filter(u => ['student','teacher'].includes(u.role));
-    const next = nextUsers.filter(u => ['student','teacher'].includes(u.role));
+  const syncUsers = async (nextUsers, options = {}) => {
+    const forceCanonicalize = options.forceCanonicalize === true;
 
-    for (const u of next) {
-      const normalizedId = String(u.id ?? '').trim();
-      const existing = prev.find(p => p.role === u.role && String(p.id) === normalizedId);
-      const docId = existing?._docId || existing?.uid || u._docId || `${u.role}_${safeDocId(normalizedId)}`;
-      const profile = { ...clean(u), id: normalizedId, uid: docId, active: true, updatedAt: Date.now() };
-      delete profile._docId;
-      delete profile.email;
-      await setDoc(doc(firestore, 'users', docId), profile, { merge: true });
+    // snapshot ก่อนแก้จากหน้าจอ ใช้เพียงเพื่อหาว่า "คนไหนเปลี่ยนจริง"
+    // จะไม่เขียนผู้ใช้ทุกคนทับกันอีกแล้ว เพราะอาจารย์หลายคนใช้งานพร้อมกันได้
+    const localMap = new Map();
+    for (const raw of db.users.filter(u => ['student','teacher'].includes(u.role))) {
+      const normalized = { ...clean(raw), id: normalizeUserId(raw.id) };
+      if (normalized.id) localMap.set(logicalUserKey(normalized), normalized);
     }
 
-    for (const old of prev) {
-      if (!next.some(n => n.role === old.role && String(n.id).trim() === String(old.id).trim())) {
-        const docId = old._docId || old.uid;
-        if (docId) await deleteDoc(doc(firestore, 'users', docId));
+    const nextMap = new Map();
+    for (const raw of nextUsers.filter(u => ['student','teacher'].includes(u.role))) {
+      const normalized = { ...clean(raw), id: normalizeUserId(raw.id) };
+      if (!normalized.id) continue;
+      const key = logicalUserKey(normalized);
+      const before = nextMap.get(key);
+      nextMap.set(key, before ? { ...before, ...normalized } : normalized);
+    }
+
+    const comparable = value => {
+      const x = clean(value || {});
+      delete x._docId;
+      delete x.uid;
+      delete x.updatedAt;
+      delete x.createdAt;
+      delete x.email;
+      return x;
+    };
+
+    const changedKeys = new Set();
+    for (const [key, nextUser] of nextMap.entries()) {
+      const before = localMap.get(key);
+      if (forceCanonicalize || !before || JSON.stringify(comparable(before)) !== JSON.stringify(comparable(nextUser))) {
+        changedKeys.add(key);
+      }
+    }
+    for (const key of localMap.keys()) {
+      if (!nextMap.has(key)) changedKeys.add(key);
+    }
+
+    // อ่านฐานข้อมูลจริง ณ เวลาบันทึก เพื่อ merge กับข้อมูลล่าสุดก่อนเขียน
+    const remoteSnap = await getDocs(collection(firestore, 'users'));
+    const remoteUsers = remoteSnap.docs.map(d => ({ ...d.data(), _docId: d.id }));
+    const remoteByKey = new Map();
+    for (const u of remoteUsers) {
+      if (!['student','teacher'].includes(u.role) || u.active === false || !normalizeUserId(u.id)) continue;
+      const key = logicalUserKey(u);
+      const arr = remoteByKey.get(key) || [];
+      arr.push(u);
+      remoteByKey.set(key, arr);
+    }
+
+    for (const [key, u] of nextMap.entries()) {
+      if (!changedKeys.has(key)) continue;
+
+      const candidates = (remoteByKey.get(key) || [])
+        .slice()
+        .sort((a, b) => Number(a.updatedAt || a.createdAt || 0) - Number(b.updatedAt || b.createdAt || 0));
+
+      let mergedRemote = {};
+      for (const candidate of candidates) mergedRemote = { ...mergedRemote, ...candidate };
+
+      const docId = canonicalUserDocId(u);
+      const profile = {
+        ...clean(mergedRemote),
+        ...clean(u),
+        id: normalizeUserId(u.id),
+        uid: docId,
+        active: true,
+        updatedAt: Date.now()
+      };
+      delete profile._docId;
+      delete profile.email;
+
+      await setDoc(doc(firestore, 'users', docId), profile, { merge: true });
+
+      // ลบเอกสารซ้ำ/legacy เฉพาะคนที่กำลังบันทึก หรือระหว่าง repair
+      for (const candidate of candidates) {
+        if (candidate._docId && candidate._docId !== docId) {
+          await deleteDoc(doc(firestore, 'users', candidate._docId));
+        }
+      }
+    }
+
+    // ลบเฉพาะ student/teacher ที่ผู้ใช้ลบออกจากรายการจริง
+    for (const remote of remoteUsers) {
+      if (!['student','teacher'].includes(remote.role) || !normalizeUserId(remote.id)) continue;
+      const key = logicalUserKey(remote);
+      if (!nextMap.has(key) && changedKeys.has(key) && remote._docId) {
+        await deleteDoc(doc(firestore, 'users', remote._docId));
       }
     }
   };
@@ -1471,7 +1633,7 @@ export default function App() {
       else if (collectionKey === 'templates') await syncSimpleCollection('templates', db.templates, newData);
       else if (collectionKey === 'submissions') await syncSimpleCollection('submissions', db.submissions, newData);
 
-      const fresh = await loadAllData();
+      let fresh = await loadAllData();
       if (currentUser && role) {
         const refreshed = fresh.users.find(u => u.role === currentUser.role && String(u.id) === String(currentUser.id));
         if (refreshed) setCurrentUser(refreshed);
@@ -1514,7 +1676,7 @@ export default function App() {
     try {
       setLoading(true);
       await ensureAnonymousSession();
-      const fresh = await loadAllData();
+      let fresh = await loadAllData();
 
       if (role === 'parent') {
         const q = searchQuery.trim().toLowerCase();
@@ -1531,12 +1693,19 @@ export default function App() {
 
       const rawId = loginId.trim();
       if (!rawId) throw new Error('กรุณากรอกรหัสผู้ใช้งาน');
-      const user = fresh.users.find(u => u.role === role && String(u.id).trim().toLowerCase() === rawId.toLowerCase());
+      let user = fresh.users.find(u => u.role === role && String(u.id).trim().toLowerCase() === rawId.toLowerCase());
       if (!user) throw new Error('รหัสผู้ใช้งานไม่ถูกต้อง หรือยังไม่มีรหัสนี้ในระบบ');
 
       if (role === 'admin') {
         if (!loginPassword) throw new Error('กรุณากรอกรหัสผ่านผู้จัดการระบบ');
         if (loginPassword !== ADMIN_PASSWORD) throw new Error('รหัสผ่านผู้จัดการระบบไม่ถูกต้อง');
+
+        // ซ่อมเอกสาร user ซ้ำจากเวอร์ชันเก่าอัตโนมัติเมื่อ Admin เข้าใช้งาน
+        // ทำให้ยอดนักศึกษา/อาจารย์ตรงกับรหัสที่ไม่ซ้ำ และย้ายไป document id มาตรฐาน
+        await syncUsers(fresh.users, { forceCanonicalize: true });
+        fresh = await loadAllData();
+        user = fresh.users.find(u => u.role === role && String(u.id).trim().toLowerCase() === rawId.toLowerCase());
+        if (!user) throw new Error('ไม่พบข้อมูลผู้จัดการระบบหลังตรวจสอบฐานข้อมูล');
       }
 
       if (role === 'teacher') {
@@ -1597,7 +1766,7 @@ export default function App() {
                 <h2 className="text-center font-medium text-gray-500 mb-6">เลือกสถานะเพื่อเข้าใช้งาน</h2>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('student')}><UserCircle className="text-blue-500"/> นักศึกษา (Student)</Button>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('teacher')}><CheckCircle className="text-green-500"/> อาจารย์ผู้ควบคุม (Teacher)</Button>
-                <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('parent')}><Search className="text-amber-500"/> ผู้ปกครอง (Parent)</Button>
+                <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('parent')}><Search className="text-amber-500"/> ผู้เข้าชม (Parent)</Button>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('admin')}><Settings className="text-gray-500"/> ผู้จัดการระบบ (Admin)</Button>
               </div>
             ) : (
