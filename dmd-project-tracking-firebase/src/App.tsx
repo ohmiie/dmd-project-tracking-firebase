@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { onAuthStateChanged, signInAnonymously, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { signInAnonymously, signOut } from 'firebase/auth';
 import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from 'firebase/firestore';
 import { auth, db as firestore } from './firebase';
 import { 
@@ -1037,7 +1037,6 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [role, setRole] = useState(null);
   const [loginId, setLoginId] = useState('');
-  const [loginPassword, setLoginPassword] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [toast, setToast] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState({ isOpen: false, msg: '', onConfirm: null });
@@ -1051,237 +1050,148 @@ export default function App() {
   const askPrompt = (title, onSubmit) => setPromptDialog({ isOpen: true, title, onSubmit, value: '' });
 
   const clean = value => JSON.parse(JSON.stringify(value ?? null));
-  const loginKey = value => Array.from(String(value || '').trim().toLowerCase()).map(ch => /[a-z0-9]/.test(ch) ? ch : `x${ch.codePointAt(0).toString(16)}`).join('');
-  const loginDocId = (userRole, id) => `${userRole}_${loginKey(id)}`;
-  const ADMIN_EMAIL = 'admin@dmd.example.com';
+  const safeDocId = value => String(value || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_') || `id_${Date.now()}`;
 
-  const getDocsArray = async (name, qRef = null) => {
-    const snap = await getDocs(qRef || collection(firestore, name));
+  const getDocsArray = async name => {
+    const snap = await getDocs(collection(firestore, name));
     return snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
   };
 
-  const loadPublic = async () => {
-    const catSnap = await getDoc(doc(firestore, 'catalogs', 'default'));
-    const publicStudents = await getDocsArray('publicStudents');
-    const publicGroups = await getDocsArray('publicProjects');
-    const teacherStubs = [];
-    publicGroups.forEach(g => {
-      if (g.teacherId && !teacherStubs.some(t => String(t.id) === String(g.teacherId))) {
-        const parts = String(g.teacherName || '').split(' ');
-        teacherStubs.push({ id: String(g.teacherId), role: 'teacher', title: '', fname: parts[0] || 'อาจารย์ผู้ควบคุม', lname: parts.slice(1).join(' ') || '' });
-      }
-    });
-    setDb(prev => ({
-      ...prev,
-      users: [...publicStudents.map(s => ({ ...s, role: 'student' })), ...teacherStubs],
-      groups: publicGroups,
-      templates: [],
-      submissions: [],
-      catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS }
-    }));
+  const ensureAnonymousSession = async () => {
+    if (auth.currentUser?.isAnonymous) return auth.currentUser;
+    if (auth.currentUser) {
+      try { await signOut(auth); } catch (_) {}
+    }
+    const cred = await signInAnonymously(auth);
+    return cred.user;
   };
 
-  const bootstrapAdmin = async firebaseUser => {
-    const ref = doc(firestore, 'users', firebaseUser.uid);
-    const snap = await getDoc(ref);
-    if (!snap.exists()) {
-      await setDoc(ref, {
-        uid: firebaseUser.uid,
+  const ensureBaseData = async () => {
+    const [usersSnap, catSnap] = await Promise.all([
+      getDocs(collection(firestore, 'users')),
+      getDoc(doc(firestore, 'catalogs', 'default'))
+    ]);
+
+    const hasAdmin = usersSnap.docs.some(d => {
+      const u = d.data();
+      return u.role === 'admin' && String(u.id || '').trim().toLowerCase() === 'admin' && u.active !== false;
+    });
+
+    if (!hasAdmin) {
+      await setDoc(doc(firestore, 'users', 'admin_default'), {
+        uid: 'admin_default',
         id: 'admin',
         role: 'admin',
         title: '',
         fname: 'ผู้จัดการ',
         lname: 'ระบบ',
-        email: firebaseUser.email,
         active: true,
         createdAt: Date.now()
-      });
+      }, { merge: true });
     }
-    const catRef = doc(firestore, 'catalogs', 'default');
-    const catSnap = await getDoc(catRef);
+
     if (!catSnap.exists()) {
-      await setDoc(catRef, { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS });
+      await setDoc(doc(firestore, 'catalogs', 'default'), { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS });
     }
   };
 
-  const getAuthProfile = async uid => {
-    const snap = await getDoc(doc(firestore, 'authProfiles', uid));
-    return snap.exists() ? { ...snap.data(), _docId: snap.id } : null;
+  const loadAllData = async () => {
+    const [usersRaw, groupsRaw, templatesRaw, submissionsRaw, catSnap] = await Promise.all([
+      getDocsArray('users'),
+      getDocsArray('groups'),
+      getDocsArray('templates'),
+      getDocsArray('submissions'),
+      getDoc(doc(firestore, 'catalogs', 'default'))
+    ]);
+
+    const users = usersRaw
+      .filter(u => u.role !== 'disabled' && u.active !== false)
+      .map(u => ({ ...u, id: u.id != null ? String(u.id).trim() : '', uid: u._docId }));
+
+    const groups = groupsRaw.map(g => ({
+      ...g,
+      id: String(g.id ?? g._docId),
+      teacherId: g.teacherId != null ? String(g.teacherId).trim() : '',
+      members: (g.members || []).map(id => String(id).trim())
+    }));
+
+    const templates = templatesRaw.map(t => ({ ...t, teacherId: t.teacherId != null ? String(t.teacherId).trim() : t.teacherId }));
+    const submissions = submissionsRaw.map(s => ({ ...s, studentId: s.studentId != null ? String(s.studentId).trim() : s.studentId }));
+    const catalogs = catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS };
+
+    const nextDb = { users, groups, templates, submissions, catalogs };
+    setDb(nextDb);
+    return nextDb;
   };
 
-  const loadPrivate = async (firebaseUser, userRole, knownProfile = null) => {
-    if (userRole === 'admin') {
-      const [usersRaw, groupsRaw, templatesRaw, submissionsRaw, catSnap] = await Promise.all([
-        getDocsArray('users'), getDocsArray('groups'), getDocsArray('templates'), getDocsArray('submissions'), getDoc(doc(firestore, 'catalogs', 'default'))
-      ]);
-      const users = usersRaw.filter(u => u.role !== 'disabled' && u.active !== false).map(u => ({ ...u, id: u.id != null ? String(u.id) : u.id, uid: u._docId }));
-      setDb({ users, groups: groupsRaw, templates: templatesRaw, submissions: submissionsRaw, catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS } });
-      return users.find(u => u.role === 'admin' && (u._docId === firebaseUser.uid || u.uid === firebaseUser.uid)) || null;
-    }
-
-    const profile = knownProfile || await getAuthProfile(firebaseUser.uid);
-    if (!profile || profile.role !== userRole || !profile.userDocId || profile.active === false) return null;
-
-    const indexSnap = await getDoc(doc(firestore, 'loginIndex', profile.loginKey));
-    if (!indexSnap.exists()) return null;
-    const indexData = indexSnap.data();
-    if (indexData.active === false || indexData.role !== userRole || String(indexData.id) !== String(profile.id) || indexData.userDocId !== profile.userDocId) return null;
-
-    const ownSnap = await getDoc(doc(firestore, 'users', profile.userDocId));
-    if (!ownSnap.exists()) return null;
-    const ownData = ownSnap.data();
-    const own = { ...ownData, id: ownData.id != null ? String(ownData.id) : ownData.id, _docId: ownSnap.id, uid: ownSnap.id };
-    if (own.role !== userRole || own.active === false || String(own.id) !== String(profile.id)) return null;
-
-    if (userRole === 'teacher') {
-      const [usersRaw, groupsRaw, templatesRaw, submissionsRaw, catSnap] = await Promise.all([
-        getDocsArray('users'), getDocsArray('groups'), getDocsArray('templates'), getDocsArray('submissions'), getDoc(doc(firestore, 'catalogs', 'default'))
-      ]);
-      const users = usersRaw.filter(u => u.role !== 'disabled' && u.active !== false).map(u => ({ ...u, id: u.id != null ? String(u.id) : u.id, uid: u._docId }));
-      setDb({ users, groups: groupsRaw, templates: templatesRaw, submissions: submissionsRaw, catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS } });
-      return users.find(u => u._docId === profile.userDocId) || own;
-    }
-
-    const groupsRaw = await getDocsArray('groups', query(collection(firestore, 'groups'), where('members', 'array-contains', String(profile.id))));
-    const submissionsRaw = await getDocsArray('submissions', query(collection(firestore, 'submissions'), where('studentId', '==', String(profile.id))));
-    const teachers = groupsRaw.map(g => ({ id: String(g.teacherId ?? ''), role: 'teacher', title: '', fname: g.teacherName || 'อาจารย์ผู้ควบคุม', lname: '' })).filter((v,i,a) => v.id && a.findIndex(x => x.id === v.id) === i);
-    const catSnap = await getDoc(doc(firestore, 'catalogs', 'default'));
-    setDb({ users: [own, ...teachers], groups: groupsRaw, templates: [], submissions: submissionsRaw, catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS } });
-    return own;
+  const restoreWebSession = nextDb => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem('dmd_web_session') || 'null');
+      if (!saved?.role) return;
+      if (saved.role === 'parent') {
+        const student = nextDb.users.find(u => u.role === 'student' && String(u.id) === String(saved.id));
+        if (student) { setRole('parent'); setCurrentUser(student); }
+        return;
+      }
+      const user = nextDb.users.find(u => u.role === saved.role && String(u.id).toLowerCase() === String(saved.id || '').toLowerCase());
+      if (user) { setRole(saved.role); setCurrentUser(user); }
+    } catch (_) {}
   };
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      try { await loadPublic(); } catch (e) { console.error(e); }
-      if (!cancelled) setLoading(false);
-    })();
-    const unsub = onAuthStateChanged(auth, async firebaseUser => {
-      if (!firebaseUser) return;
       try {
-        if (!firebaseUser.isAnonymous && firebaseUser.email === ADMIN_EMAIL) {
-          await bootstrapAdmin(firebaseUser);
-          await provisionLoginIndex();
-          const loaded = await loadPrivate(firebaseUser, 'admin');
-          if (!cancelled && loaded) { setRole('admin'); setCurrentUser(loaded); }
-          return;
-        }
-        if (firebaseUser.isAnonymous) {
-          const profile = await getAuthProfile(firebaseUser.uid);
-          if (!profile || !['student','teacher'].includes(profile.role)) return;
-          const loaded = await loadPrivate(firebaseUser, profile.role, profile);
-          if (!cancelled && loaded) { setRole(profile.role); setCurrentUser(loaded); }
-        }
-      } catch (e) { console.error('restore session', e); }
-    });
-    return () => { cancelled = true; unsub(); };
+        setLoading(true);
+        await ensureAnonymousSession();
+        await ensureBaseData();
+        const nextDb = await loadAllData();
+        if (!cancelled) restoreWebSession(nextDb);
+      } catch (err) {
+        console.error('init', err);
+        if (!cancelled) showToast(`ไม่สามารถเริ่มระบบได้: ${err?.message || err}`, 'error');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
-
-  const provisionLoginIndex = async () => {
-    const snap = await getDocs(collection(firestore, 'users'));
-    const existing = snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
-    const candidates = existing.filter(u => ['student','teacher'].includes(u.role) && u.active !== false && u.id != null);
-
-    for (const u of candidates) {
-      const normalizedId = String(u.id);
-      if (u.id !== normalizedId) {
-        await setDoc(doc(firestore, 'users', u._docId), { id: normalizedId, updatedAt: Date.now() }, { merge: true });
-      }
-      const key = loginDocId(u.role, normalizedId);
-      await setDoc(doc(firestore, 'loginIndex', key), {
-        loginKey: key,
-        id: normalizedId,
-        role: u.role,
-        userDocId: u._docId,
-        active: true,
-        updatedAt: Date.now()
-      });
-    }
-
-    // แปลงรหัสอ้างอิงเก่าที่อาจเป็นตัวเลขให้เป็นข้อความ เพื่อให้ Rules เปรียบเทียบได้ตรงกัน
-    const groupsSnap = await getDocs(collection(firestore, 'groups'));
-    for (const gd of groupsSnap.docs) {
-      const g = gd.data();
-      const teacherId = g.teacherId != null ? String(g.teacherId) : '';
-      const members = (g.members || []).map(id => String(id));
-      await setDoc(gd.ref, { teacherId, members, updatedAt: Date.now() }, { merge: true });
-      await setDoc(doc(firestore, 'publicProjects', gd.id), {
-        id: gd.id,
-        name: g.name || '',
-        level: g.level || '',
-        room: g.room || '',
-        members,
-        milestones: g.milestones || [],
-        teacherId,
-        teacherName: g.teacherName || ''
-      }, { merge: true });
-    }
-
-    const templatesSnap = await getDocs(collection(firestore, 'templates'));
-    for (const td of templatesSnap.docs) {
-      const t = td.data();
-      if (t.teacherId != null) {
-        await setDoc(td.ref, { teacherId: String(t.teacherId), updatedAt: Date.now() }, { merge: true });
-      }
-    }
-
-    const submissionsSnap = await getDocs(collection(firestore, 'submissions'));
-    for (const sd of submissionsSnap.docs) {
-      const s = sd.data();
-      if (s.studentId != null) {
-        await setDoc(sd.ref, { studentId: String(s.studentId), updatedAt: Date.now() }, { merge: true });
-      }
-    }
-
-    return candidates.length;
-  };
-
 
   const syncUsers = async nextUsers => {
     const prev = db.users.filter(u => ['student','teacher'].includes(u.role));
     const next = nextUsers.filter(u => ['student','teacher'].includes(u.role));
-    const finalUsers = [];
 
     for (const u of next) {
-      const existing = prev.find(p => p.role === u.role && String(p.id) === String(u.id));
-      const docId = existing?._docId || existing?.uid || u._docId || `${u.role}_${loginKey(u.id)}`;
-      const profile = { ...clean(u), uid: docId, active: true, updatedAt: Date.now() };
+      const normalizedId = String(u.id ?? '').trim();
+      const existing = prev.find(p => p.role === u.role && String(p.id) === normalizedId);
+      const docId = existing?._docId || existing?.uid || u._docId || `${u.role}_${safeDocId(normalizedId)}`;
+      const profile = { ...clean(u), id: normalizedId, uid: docId, active: true, updatedAt: Date.now() };
       delete profile._docId;
       delete profile.email;
       await setDoc(doc(firestore, 'users', docId), profile, { merge: true });
-      const key = loginDocId(u.role, u.id);
-      await setDoc(doc(firestore, 'loginIndex', key), { loginKey:key, id:String(u.id), role:u.role, userDocId:docId, active:true, updatedAt:Date.now() });
-      if (u.role === 'student') {
-        await setDoc(doc(firestore, 'publicStudents', String(u.id)), { id:String(u.id), title:u.title||'', fname:u.fname||'', lname:u.lname||'', level:u.level||'', room:u.room||'', role:'student' });
-      }
-      finalUsers.push({ ...profile, _docId: docId });
     }
 
     for (const old of prev) {
-      if (!next.some(n => n.role === old.role && String(n.id) === String(old.id))) {
+      if (!next.some(n => n.role === old.role && String(n.id).trim() === String(old.id).trim())) {
         const docId = old._docId || old.uid;
-        if (docId) await setDoc(doc(firestore, 'users', docId), { ...clean(old), uid:docId, role:'disabled', originalRole:old.role, active:false, disabledAt:Date.now() }, { merge:true });
-        try { await deleteDoc(doc(firestore, 'loginIndex', loginDocId(old.role, old.id))); } catch (_) {}
-        if (old.role === 'student') await deleteDoc(doc(firestore, 'publicStudents', String(old.id)));
+        if (docId) await deleteDoc(doc(firestore, 'users', docId));
       }
     }
-    return finalUsers;
   };
 
   const syncGroups = async nextGroups => {
     const normalizeGroup = g => ({
       ...clean(g),
       id: String(g.id),
-      teacherId: g.teacherId != null ? String(g.teacherId) : '',
-      members: (g.members || []).map(id => String(id))
+      teacherId: g.teacherId != null ? String(g.teacherId).trim() : '',
+      members: (g.members || []).map(id => String(id).trim())
     });
     const core = g => {
       const x = normalizeGroup(g);
-      delete x.teacherUid;
-      delete x.teacherName;
-      delete x.memberUids;
       delete x.updatedAt;
       delete x._docId;
+      delete x.teacherUid;
+      delete x.memberUids;
       return x;
     };
 
@@ -1289,37 +1199,19 @@ export default function App() {
     const nextMap = new Map(nextGroups.map(g => [String(g.id), normalizeGroup(g)]));
 
     for (const [id, g] of nextMap.entries()) {
-      const prev = prevMap.get(id);
-      if (prev && JSON.stringify(core(prev)) === JSON.stringify(core(g))) continue;
-
-      const teacher = db.users.find(u => String(u.id ?? '') === String(g.teacherId ?? ''));
-      const members = (g.members || []).map(idVal => db.users.find(u => String(u.id ?? '') === String(idVal))).filter(Boolean);
+      const before = prevMap.get(id);
+      if (before && JSON.stringify(core(before)) === JSON.stringify(core(g))) continue;
+      const teacher = db.users.find(u => u.role === 'teacher' && String(u.id) === String(g.teacherId));
       const enriched = {
         ...g,
-        teacherUid: teacher?._docId || teacher?.uid || '',
-        teacherName: teacher ? `${teacher.title||''}${teacher.fname||''} ${teacher.lname||''}`.trim() : '',
-        memberUids: members.map(m => m._docId || m.uid).filter(Boolean),
+        teacherName: teacher ? `${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''}`.trim() : (g.teacherName || ''),
         updatedAt: Date.now()
       };
-
       await setDoc(doc(firestore, 'groups', id), enriched);
-      await setDoc(doc(firestore, 'publicProjects', id), {
-        id,
-        name: g.name || '',
-        level: g.level || '',
-        room: g.room || '',
-        members: g.members || [],
-        milestones: g.milestones || [],
-        teacherId: g.teacherId,
-        teacherName: enriched.teacherName
-      });
     }
 
     for (const [id] of prevMap.entries()) {
-      if (!nextMap.has(id)) {
-        await deleteDoc(doc(firestore, 'groups', id));
-        await deleteDoc(doc(firestore, 'publicProjects', id));
-      }
+      if (!nextMap.has(id)) await deleteDoc(doc(firestore, 'groups', id));
     }
   };
 
@@ -1328,11 +1220,10 @@ export default function App() {
       const x = clean(item);
       delete x.updatedAt;
       delete x._docId;
-      if (x.teacherId != null) x.teacherId = String(x.teacherId);
-      if (x.studentId != null) x.studentId = String(x.studentId);
+      if (x.teacherId != null) x.teacherId = String(x.teacherId).trim();
+      if (x.studentId != null) x.studentId = String(x.studentId).trim();
       return x;
     };
-
     const prevMap = new Map((prev || []).map(item => [String(item.id), item]));
     const nextMap = new Map((next || []).map(item => [String(item.id), cleanCore(item)]));
 
@@ -1341,7 +1232,6 @@ export default function App() {
       if (before && JSON.stringify(cleanCore(before)) === JSON.stringify(item)) continue;
       await setDoc(doc(firestore, name, id), { ...item, updatedAt: Date.now() });
     }
-
     for (const [id] of prevMap.entries()) {
       if (!nextMap.has(id)) await deleteDoc(doc(firestore, name, id));
     }
@@ -1351,15 +1241,18 @@ export default function App() {
     const previous = db[collectionKey];
     setDb(prev => ({ ...prev, [collectionKey]: newData }));
     try {
+      await ensureAnonymousSession();
       if (collectionKey === 'catalogs') await setDoc(doc(firestore, 'catalogs', 'default'), clean(newData));
       else if (collectionKey === 'users') await syncUsers(newData);
       else if (collectionKey === 'groups') await syncGroups(newData);
       else if (collectionKey === 'templates') await syncSimpleCollection('templates', db.templates, newData);
       else if (collectionKey === 'submissions') await syncSimpleCollection('submissions', db.submissions, newData);
-      if (auth.currentUser && role && role !== 'parent') {
-        const refreshed = await loadPrivate(auth.currentUser, role);
-        if (refreshed && refreshed.uid === currentUser?.uid) setCurrentUser(refreshed);
-      } else await loadPublic();
+
+      const fresh = await loadAllData();
+      if (currentUser && role) {
+        const refreshed = fresh.users.find(u => u.role === currentUser.role && String(u.id) === String(currentUser.id));
+        if (refreshed) setCurrentUser(refreshed);
+      }
       return true;
     } catch (err) {
       console.error(err);
@@ -1371,77 +1264,50 @@ export default function App() {
 
   const handleLogin = async e => {
     e.preventDefault();
-    if (role === 'parent') {
-      const q = searchQuery.trim().toLowerCase();
-      const student = db.users.find(u => u.role === 'student' && (String(u.id) === searchQuery.trim() || String(u.fname||'').toLowerCase().includes(q) || String(u.lname||'').toLowerCase().includes(q)));
-      if (student) setCurrentUser(student); else showToast('ไม่พบข้อมูลนักศึกษาที่ค้นหา', 'error');
-      return;
-    }
-
     try {
       setLoading(true);
-      if (role === 'admin') {
-        if (loginId.trim().toLowerCase() !== 'admin') throw new Error('รหัสผู้จัดการระบบไม่ถูกต้อง');
-        const cred = await signInWithEmailAndPassword(auth, ADMIN_EMAIL, loginPassword);
-        await bootstrapAdmin(cred.user);
-        await provisionLoginIndex();
-        const loaded = await loadPrivate(cred.user, 'admin');
-        if (!loaded) throw new Error('ไม่พบข้อมูลผู้จัดการระบบ');
-        setCurrentUser(loaded);
-        showToast('เข้าสู่ระบบสำเร็จ');
+      await ensureAnonymousSession();
+      const fresh = await loadAllData();
+
+      if (role === 'parent') {
+        const q = searchQuery.trim().toLowerCase();
+        const student = fresh.users.find(u => u.role === 'student' && (
+          String(u.id).toLowerCase() === q ||
+          String(u.fname || '').toLowerCase().includes(q) ||
+          String(u.lname || '').toLowerCase().includes(q)
+        ));
+        if (!student) throw new Error('ไม่พบข้อมูลนักศึกษาที่ค้นหา');
+        setCurrentUser(student);
+        sessionStorage.setItem('dmd_web_session', JSON.stringify({ role: 'parent', id: student.id }));
         return;
       }
 
       const rawId = loginId.trim();
       if (!rawId) throw new Error('กรุณากรอกรหัสผู้ใช้งาน');
-      const key = loginDocId(role, rawId);
-      const indexSnap = await getDoc(doc(firestore, 'loginIndex', key));
-      if (!indexSnap.exists()) throw new Error('ไม่พบรหัสนี้ในระบบ');
-      const indexData = indexSnap.data();
-      if (indexData.active === false || indexData.role !== role || String(indexData.id) !== rawId || !indexData.userDocId) throw new Error('รหัสนี้ไม่สามารถเข้าใช้งานได้');
+      const user = fresh.users.find(u => u.role === role && String(u.id).trim().toLowerCase() === rawId.toLowerCase());
+      if (!user) throw new Error('รหัสผู้ใช้งานไม่ถูกต้อง หรือยังไม่มีรหัสนี้ในระบบ');
 
-      if (auth.currentUser && !auth.currentUser.isAnonymous) {
-        try { await signOut(auth); } catch (_) {}
-      }
-
-      let firebaseUser = auth.currentUser;
-      if (!firebaseUser || !firebaseUser.isAnonymous) {
-        const cred = await signInAnonymously(auth);
-        firebaseUser = cred.user;
-      }
-
-      const profile = {
-        loginKey: key,
-        id: rawId,
-        role,
-        userDocId: indexData.userDocId,
-        active: true,
-        updatedAt: Date.now()
-      };
-      await setDoc(doc(firestore, 'authProfiles', firebaseUser.uid), profile, { merge: true });
-      const loaded = await loadPrivate(firebaseUser, role, profile);
-      if (!loaded) throw new Error('ไม่พบข้อมูลผู้ใช้งาน');
-      setCurrentUser(loaded);
-      showToast(`เข้าสู่ระบบสำเร็จ ยินดีต้อนรับ ${loaded.fname || ''}`);
+      setCurrentUser(user);
+      sessionStorage.setItem('dmd_web_session', JSON.stringify({ role, id: user.id }));
+      showToast(`เข้าสู่ระบบสำเร็จ ยินดีต้อนรับ ${user.fname || ''}`);
     } catch (err) {
       console.error(err);
-      if (role !== 'admin' && auth.currentUser) {
-        try { await signOut(auth); } catch (_) {}
-      }
-      showToast(role === 'admin' ? 'รหัสผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง' : (err?.message || 'ไม่สามารถเข้าสู่ระบบได้'), 'error');
-    } finally { setLoading(false); }
+      showToast(err?.message || 'ไม่สามารถเข้าสู่ระบบได้', 'error');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const logout = async () => {
+    sessionStorage.removeItem('dmd_web_session');
+    setCurrentUser(null);
+    setRole(null);
+    setLoginId('');
+    setSearchQuery('');
     try {
-      if (auth.currentUser?.isAnonymous) {
-        try { await deleteDoc(doc(firestore, 'authProfiles', auth.currentUser.uid)); } catch (_) {}
-      } else if (auth.currentUser) {
-        await signOut(auth);
-      }
+      await ensureAnonymousSession();
+      await loadAllData();
     } catch (_) {}
-    setCurrentUser(null); setRole(null); setLoginId(''); setLoginPassword(''); setSearchQuery('');
-    await loadPublic();
   };
 
   if (loading) {
@@ -1465,10 +1331,12 @@ export default function App() {
             ) : (
               <form onSubmit={handleLogin} className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-300">
                 <div className="flex items-center gap-2 text-blue-600 font-semibold mb-2"><button type="button" onClick={() => setRole(null)} className="p-1 hover:bg-blue-50 rounded"><ChevronRight className="rotate-180" size={18}/></button>เข้าสู่ระบบในฐานะ {role === 'student' ? 'นักศึกษา' : role === 'teacher' ? 'อาจารย์ผู้ควบคุม' : role === 'admin' ? 'ผู้จัดการระบบ' : 'ผู้เข้าชม'}</div>
-                {role === 'parent' ? <Input label="ค้นหานักศึกษา" placeholder="กรอกรหัสนักศึกษา หรือ ชื่อ..." required value={searchQuery} onChange={e => setSearchQuery(e.target.value)}/> : <Input label="รหัสผู้ใช้งาน" placeholder="กรอกรหัส..." required value={loginId} onChange={e => setLoginId(e.target.value)}/>} 
-                {role === 'admin' && <Input label="รหัสผ่าน Admin" type="password" placeholder="กรอกรหัสผ่านผู้จัดการระบบ" required value={loginPassword} onChange={e => setLoginPassword(e.target.value)}/>} 
+                {role === 'parent'
+                  ? <Input label="ค้นหานักศึกษา" placeholder="กรอกรหัสนักศึกษา หรือ ชื่อ..." required value={searchQuery} onChange={e => setSearchQuery(e.target.value)}/>
+                  : <Input label="รหัสผู้ใช้งาน" placeholder={role === 'admin' ? 'กรอก admin' : 'กรอกรหัส...'} required value={loginId} onChange={e => setLoginId(e.target.value)}/>
+                }
                 <Button type="submit" className="w-full mt-4">เข้าสู่ระบบ</Button>
-                <div className="text-xs text-gray-400 mt-6 pt-4 border-t text-center flex flex-col gap-1 items-center justify-center"><span className="flex items-center gap-1"><ShieldCheck size={14}/> ระบบพร้อมใช้งาน</span>{role === 'admin' && <span>รหัสผู้ใช้ Admin: <b>admin</b></span>}{(role === 'student' || role === 'teacher') && <span>ใช้รหัสประจำตัวเข้าสู่ระบบได้โดยตรง</span>}</div>
+                <div className="text-xs text-gray-400 mt-6 pt-4 border-t text-center flex flex-col gap-1 items-center justify-center"><span className="flex items-center gap-1"><ShieldCheck size={14}/> ระบบพร้อมใช้งาน</span><span>{role === 'admin' ? 'รหัสผู้จัดการระบบ: admin' : role === 'parent' ? 'ค้นหาด้วยรหัสหรือชื่อนักศึกษา' : 'ใช้รหัสประจำตัวเข้าสู่ระบบได้โดยตรง'}</span></div>
               </form>
             )}
           </div>
