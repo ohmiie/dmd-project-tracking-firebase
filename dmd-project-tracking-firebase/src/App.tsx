@@ -30,6 +30,23 @@ const hasRejectedMilestone = (milestones) => {
   return milestones.some(m => m.status === 'rejected');
 };
 
+const makeSecuritySalt = () => {
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+};
+
+const hashTeacherSecret = async (secret, salt) => {
+  const input = new TextEncoder().encode(`${salt}:${String(secret || '')}`);
+  const digest = await window.crypto.subtle.digest('SHA-256', input);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+};
+
+const generateTeacherSetupCode = () => {
+  const n = new Uint32Array(1);
+  window.crypto.getRandomValues(n);
+  return String(100000 + (n[0] % 900000));
+};
 
 const toDateInputValue = (date = new Date()) => {
   const d = new Date(date);
@@ -197,6 +214,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
   const [formData, setFormData] = useState({ id: '', title: '', fname: '', lname: '', level: LEVELS[0], room: ROOMS[0] });
+  const [setupCodeDialog, setSetupCodeDialog] = useState({ isOpen: false, code: '', teacherName: '' });
   const fileInputRef = useRef(null);
 
   const isUserTab = activeTab === 'students' || activeTab === 'teachers';
@@ -224,6 +242,35 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
       handleUpdate('users', db.users.filter(u => u.id !== id));
       showToast('ลบข้อมูลสำเร็จ');
     });
+  };
+
+  const issueTeacherSetupCode = async (teacher) => {
+    const code = generateTeacherSetupCode();
+    const salt = makeSecuritySalt();
+    const tempHash = await hashTeacherSecret(code, salt);
+    const nextUsers = db.users.map(u => String(u.id) === String(teacher.id) && u.role === 'teacher' ? {
+      ...u,
+      teacherPasswordSet: false,
+      teacherPasswordHash: '',
+      teacherPasswordSalt: '',
+      teacherTempHash: tempHash,
+      teacherTempSalt: salt,
+      teacherPasswordUpdatedAt: Date.now()
+    } : u);
+    const ok = await handleUpdate('users', nextUsers);
+    if (!ok) return;
+    setSetupCodeDialog({
+      isOpen: true,
+      code,
+      teacherName: `${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''}`.trim()
+    });
+  };
+
+  const handleTeacherSetupCode = (teacher) => {
+    const message = teacher.teacherPasswordSet
+      ? `ต้องการรีเซ็ตรหัสผ่านของ ${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''} หรือไม่? รหัสผ่านเดิมจะใช้งานไม่ได้ และระบบจะสร้างรหัสตั้งต้นใหม่`
+      : `สร้างรหัสตั้งต้นสำหรับ ${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''} หรือไม่?`;
+    askConfirm(message, () => issueTeacherSetupCode(teacher));
   };
 
   const openModal = (user = null) => {
@@ -280,8 +327,12 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
         imported.push(user);
       }
       if (!imported.length) return showToast('ไม่พบข้อมูลที่ถูกต้องในไฟล์ CSV', 'error');
-      const oldWithoutDup = db.users.filter(u => !imported.some(n => n.id === u.id));
-      handleUpdate('users', [...oldWithoutDup, ...imported]);
+      const mergedImported = imported.map(n => {
+        const old = db.users.find(u => u.role === n.role && String(u.id) === String(n.id));
+        return old ? { ...old, ...n } : n;
+      });
+      const oldWithoutDup = db.users.filter(u => !mergedImported.some(n => n.role === u.role && String(n.id) === String(u.id)));
+      handleUpdate('users', [...oldWithoutDup, ...mergedImported]);
       showToast(`นำเข้าข้อมูลสำเร็จ ${imported.length} รายการ`);
       e.target.value = '';
     };
@@ -354,7 +405,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
           <div><h3 className="text-lg font-bold">{activeTab==='students'?'ข้อมูลนักศึกษา':'ข้อมูลอาจารย์'}</h3><p className="text-xs text-gray-500">เพิ่ม แก้ไข ลบ หรือนำเข้าด้วย CSV</p></div>
           <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={downloadCSVTemplate}><Download size={16}/> ตัวอย่าง CSV</Button><input type="file" accept=".csv,text/csv" ref={fileInputRef} className="hidden" onChange={handleFileUpload}/><Button variant="secondary" onClick={()=>fileInputRef.current?.click()}><Upload size={16}/> นำเข้า CSV</Button><Button onClick={()=>openModal()}><Plus size={16}/> เพิ่ม</Button></div>
         </div>
-        <Card className="overflow-x-auto"><table className="w-full text-sm min-w-[600px]"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left p-3">รหัส</th><th className="text-left p-3">ชื่อ-สกุล</th>{activeTab==='students'&&<th className="text-left p-3">ระดับชั้น / ห้อง</th>}<th className="text-right p-3">จัดการ</th></tr></thead><tbody>{filteredUsers.map(user=><tr key={user.id} className="border-t hover:bg-gray-50"><td className="p-3 font-medium">{user.id}</td><td className="p-3">{user.title}{user.fname} {user.lname}</td>{activeTab==='students'&&<td className="p-3">{user.level} / {user.room}</td>}<td className="p-3"><div className="flex justify-end gap-1"><button onClick={()=>openModal(user)} className="p-2 text-blue-600 hover:bg-blue-50 rounded"><Edit2 size={16}/></button><button onClick={()=>handleDelete(user.id)} className="p-2 text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div></td></tr>)}{!filteredUsers.length&&<tr><td colSpan={4} className="p-8 text-center text-gray-400">ยังไม่มีข้อมูล</td></tr>}</tbody></table></Card>
+        <Card className="overflow-x-auto"><table className="w-full text-sm min-w-[720px]"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left p-3">รหัส</th><th className="text-left p-3">ชื่อ-สกุล</th>{activeTab==='students'&&<th className="text-left p-3">ระดับชั้น / ห้อง</th>}{activeTab==='teachers'&&<th className="text-left p-3">รหัสผ่าน</th>}<th className="text-right p-3">จัดการ</th></tr></thead><tbody>{filteredUsers.map(user=><tr key={user.id} className="border-t hover:bg-gray-50"><td className="p-3 font-medium">{user.id}</td><td className="p-3">{user.title}{user.fname} {user.lname}</td>{activeTab==='students'&&<td className="p-3">{user.level} / {user.room}</td>}{activeTab==='teachers'&&<td className="p-3"><span className={`inline-flex px-2 py-1 rounded-full text-xs font-semibold ${user.teacherPasswordSet ? 'bg-green-50 text-green-700' : user.teacherTempHash ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>{user.teacherPasswordSet ? 'ตั้งแล้ว' : user.teacherTempHash ? 'รอตั้งรหัส' : 'ยังไม่เปิดใช้งาน'}</span></td>}<td className="p-3"><div className="flex justify-end gap-1">{activeTab==='teachers'&&<button title={user.teacherPasswordSet ? 'รีเซ็ตรหัสผ่าน' : 'สร้างรหัสตั้งต้น'} onClick={()=>handleTeacherSetupCode(user)} className="p-2 text-green-600 hover:bg-green-50 rounded"><ShieldCheck size={16}/></button>}<button onClick={()=>openModal(user)} className="p-2 text-blue-600 hover:bg-blue-50 rounded"><Edit2 size={16}/></button><button onClick={()=>handleDelete(user.id)} className="p-2 text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div></td></tr>)}{!filteredUsers.length&&<tr><td colSpan={activeTab==='teachers'?4:4} className="p-8 text-center text-gray-400">ยังไม่มีข้อมูล</td></tr>}</tbody></table></Card>
       </div>}
 
       {activeTab === 'catalogs' && <div className="grid md:grid-cols-2 gap-6">
@@ -373,6 +424,22 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
           <div className="flex justify-end gap-2 pt-3"><Button variant="secondary" onClick={()=>setIsModalOpen(false)}>ยกเลิก</Button><Button onClick={handleSave}>บันทึก</Button></div>
         </div>
       </Modal>
+
+      <Modal isOpen={setupCodeDialog.isOpen} onClose={()=>setSetupCodeDialog({isOpen:false,code:'',teacherName:''})} title="รหัสตั้งต้นสำหรับอาจารย์">
+        <div className="space-y-5">
+          <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
+            <p className="text-sm text-gray-600">ส่งรหัสนี้ให้อาจารย์ <b>{setupCodeDialog.teacherName}</b> โดยตรง ระบบจะให้อาจารย์ตั้งรหัสผ่านส่วนตัวใหม่ทันทีหลังยืนยันรหัสตั้งต้น</p>
+          </div>
+          <div className="text-center">
+            <p className="text-xs text-gray-500 mb-2">รหัสตั้งต้น 6 หลัก</p>
+            <div className="text-4xl font-bold tracking-[0.25em] text-blue-700 bg-gray-50 border rounded-xl py-5">{setupCodeDialog.code}</div>
+          </div>
+          <div className="flex gap-2 justify-end">
+            <Button variant="secondary" onClick={async()=>{ try { await navigator.clipboard.writeText(setupCodeDialog.code); showToast('คัดลอกรหัสตั้งต้นแล้ว'); } catch (_) { showToast('คัดลอกไม่สำเร็จ กรุณาจดรหัสไว้','error'); } }}><Copy size={16}/> คัดลอก</Button>
+            <Button onClick={()=>setSetupCodeDialog({isOpen:false,code:'',teacherName:''})}>เสร็จสิ้น</Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 };
@@ -384,8 +451,14 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
   const [templateTeacherFilter, setTemplateTeacherFilter] = useState('all');
+  const [isGroupTemplateModalOpen, setIsGroupTemplateModalOpen] = useState(false);
+  const [groupTemplateTeacherFilter, setGroupTemplateTeacherFilter] = useState('all');
   const [groupForm, setGroupForm] = useState({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] });
   const [searchStudent, setSearchStudent] = useState('');
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
 
   const myGroups = adminMode ? db.groups : db.groups.filter(g => String(g.teacherId ?? '') === String(user.id ?? ''));
   const allTemplates = db.templates || [];
@@ -406,6 +479,29 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     .sort((a, b) => {
       const nameCompare = getTeacherDisplayName(a.teacherId).localeCompare(getTeacherDisplayName(b.teacherId), 'th');
       if (nameCompare !== 0) return nameCompare;
+      return String(a.name || '').localeCompare(String(b.name || ''), 'th');
+    });
+
+  // กลุ่มต้นแบบ: ใช้โครงสร้างกลุ่มนักศึกษาของอาจารย์ท่านอื่น
+  // คัดลอกเฉพาะชื่อกลุ่ม ระดับชั้น ห้อง และสมาชิก ไม่คัดลอกผลประเมิน/กำหนดส่ง/ลิงก์
+  const groupTemplateSourceGroups = (db.groups || []).filter(g => {
+    if (adminMode) return true;
+    return String(g.teacherId ?? '') !== String(user.id ?? '');
+  });
+
+  const groupTemplateTeacherOptions = Array.from(new Set(groupTemplateSourceGroups.map(g => String(g.teacherId ?? '')).filter(Boolean)))
+    .map(id => ({ value: id, label: getTeacherDisplayName(id) }))
+    .sort((a, b) => a.label.localeCompare(b.label, 'th'));
+
+  const visibleGroupTemplates = groupTemplateSourceGroups
+    .filter(g => groupTemplateTeacherFilter === 'all' || String(g.teacherId ?? '') === groupTemplateTeacherFilter)
+    .sort((a, b) => {
+      const teacherCompare = getTeacherDisplayName(a.teacherId).localeCompare(getTeacherDisplayName(b.teacherId), 'th');
+      if (teacherCompare !== 0) return teacherCompare;
+      const levelCompare = String(a.level || '').localeCompare(String(b.level || ''), 'th');
+      if (levelCompare !== 0) return levelCompare;
+      const roomCompare = String(a.room || '').localeCompare(String(b.room || ''), 'th');
+      if (roomCompare !== 0) return roomCompare;
       return String(a.name || '').localeCompare(String(b.name || ''), 'th');
     });
 
@@ -559,12 +655,62 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     }
   };
 
+  const useGroupAsTemplate = (sourceGroupId) => {
+    const source = (db.groups || []).find(g => String(g.id) === String(sourceGroupId));
+    if (!source) return showToast('ไม่พบกลุ่มต้นแบบที่เลือก', 'error');
+
+    const copiedMembers = (source.members || []).map(id => String(id));
+    setGroupForm({
+      id: '',
+      name: source.name || '',
+      teacherId: adminMode ? String(source.teacherId ?? '') : String(user.id ?? ''),
+      level: source.level || LEVELS[0],
+      room: source.room || ROOMS[0],
+      members: copiedMembers,
+      milestones: [],
+      links: []
+    });
+    setSearchStudent('');
+    setIsGroupTemplateModalOpen(false);
+    setIsGroupModalOpen(true);
+    showToast('คัดลอกกลุ่มต้นแบบแล้ว กรุณาตรวจสอบชื่อกลุ่มและสมาชิกก่อนบันทึก');
+  };
+
+  const changeTeacherPassword = async () => {
+    if (adminMode) return;
+    if (!user.teacherPasswordSet || !user.teacherPasswordHash || !user.teacherPasswordSalt) return showToast('บัญชีนี้ยังไม่มีรหัสผ่านถาวร กรุณาติดต่อผู้จัดการระบบ', 'error');
+    if (newPassword.length < 6) return showToast('รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร', 'error');
+    if (newPassword !== confirmNewPassword) return showToast('ยืนยันรหัสผ่านใหม่ไม่ตรงกัน', 'error');
+    const currentHash = await hashTeacherSecret(currentPassword, user.teacherPasswordSalt);
+    if (currentHash !== user.teacherPasswordHash) return showToast('รหัสผ่านปัจจุบันไม่ถูกต้อง', 'error');
+
+    const salt = makeSecuritySalt();
+    const passwordHash = await hashTeacherSecret(newPassword, salt);
+    const nextUsers = db.users.map(u => u.role === 'teacher' && String(u.id) === String(user.id) ? {
+      ...u,
+      teacherPasswordSet: true,
+      teacherPasswordHash: passwordHash,
+      teacherPasswordSalt: salt,
+      teacherTempHash: '',
+      teacherTempSalt: '',
+      teacherPasswordUpdatedAt: Date.now()
+    } : u);
+    const ok = await handleUpdate('users', nextUsers);
+    if (!ok) return;
+    setCurrentPassword(''); setNewPassword(''); setConfirmNewPassword(''); setIsPasswordModalOpen(false);
+    showToast('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว');
+  };
+
   return (
     <div className="space-y-6 flex flex-col md:flex-row gap-6">
       <div className="w-full md:w-1/3 flex flex-col gap-4">
-        <div className="flex justify-between items-center">
+        <div className="flex justify-between items-center gap-2">
           <h2 className="text-xl font-bold text-gray-800">{adminMode ? 'กลุ่มโครงงานทั้งหมด' : 'กลุ่มโครงงานของฉัน'}</h2>
-          <Button onClick={() => { setGroupForm({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] }); setIsGroupModalOpen(true); }} className="py-1.5 px-3 text-sm"><Plus size={16}/> สร้าง</Button>
+          <div className="flex gap-2 flex-wrap justify-end">
+            {!adminMode && <Button variant="secondary" onClick={()=>setIsPasswordModalOpen(true)} className="py-1.5 px-3 text-sm"><ShieldCheck size={16}/> รหัสผ่าน</Button>}
+            {!adminMode && <Button variant="secondary" onClick={() => { setGroupTemplateTeacherFilter('all'); setIsGroupTemplateModalOpen(true); }} className="py-1.5 px-3 text-sm"><Copy size={16}/> คัดลอกกลุ่ม</Button>}
+            <Button onClick={() => { setGroupForm({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] }); setIsGroupModalOpen(true); }} className="py-1.5 px-3 text-sm"><Plus size={16}/> สร้าง</Button>
+          </div>
         </div>
         <div className="space-y-3">
           {myGroups.map(group => (
@@ -728,6 +874,64 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
           </div>
         )}
       </div>
+
+      {!adminMode && <Modal isOpen={isPasswordModalOpen} onClose={() => { setIsPasswordModalOpen(false); setCurrentPassword(''); setNewPassword(''); setConfirmNewPassword(''); }} title="เปลี่ยนรหัสผ่านอาจารย์">
+        <div className="space-y-4">
+          <Input label="รหัสผ่านปัจจุบัน" type="password" value={currentPassword} onChange={e=>setCurrentPassword(e.target.value)} placeholder="กรอกรหัสผ่านปัจจุบัน"/>
+          <Input label="รหัสผ่านใหม่" type="password" value={newPassword} onChange={e=>setNewPassword(e.target.value)} placeholder="อย่างน้อย 6 ตัวอักษร"/>
+          <Input label="ยืนยันรหัสผ่านใหม่" type="password" value={confirmNewPassword} onChange={e=>setConfirmNewPassword(e.target.value)} placeholder="กรอกรหัสผ่านใหม่อีกครั้ง"/>
+          <div className="flex justify-end gap-2 pt-3"><Button variant="secondary" onClick={()=>setIsPasswordModalOpen(false)}>ยกเลิก</Button><Button onClick={changeTeacherPassword}>บันทึกรหัสผ่านใหม่</Button></div>
+        </div>
+      </Modal>}
+
+      {!adminMode && <Modal isOpen={isGroupTemplateModalOpen} onClose={() => setIsGroupTemplateModalOpen(false)} title="คัดลอกกลุ่มจากอาจารย์ท่านอื่น">
+        <div className="space-y-4">
+          <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
+            <p className="text-sm font-semibold text-blue-800">เลือกกลุ่มนักศึกษาที่มีอยู่แล้วมาเป็นต้นแบบ</p>
+            <p className="text-xs text-blue-700 mt-1">ระบบจะคัดลอกชื่อกลุ่ม ระดับชั้น ห้อง และสมาชิกมาให้คุณตรวจสอบก่อนบันทึก โดยไม่คัดลอกผลประเมิน กำหนดส่ง หรือลิงก์งานของอาจารย์ต้นฉบับ</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">เลือกจากอาจารย์</label>
+            <select
+              value={groupTemplateTeacherFilter}
+              onChange={e => setGroupTemplateTeacherFilter(e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-4 py-2.5 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="all">อาจารย์ทั้งหมด</option>
+              {groupTemplateTeacherOptions.map(opt => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-3 max-h-[52vh] overflow-y-auto pr-1">
+            {visibleGroupTemplates.length > 0 ? visibleGroupTemplates.map(source => (
+              <div key={source.id} className="border border-gray-200 rounded-xl p-4 hover:border-blue-300 transition-colors">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-gray-800 break-words">{source.name || 'ไม่ระบุชื่อกลุ่ม'}</p>
+                    <p className="text-xs text-blue-600 mt-1">เจ้าของกลุ่ม: {getTeacherDisplayName(source.teacherId)}</p>
+                    <p className="text-xs text-gray-500 mt-1">{source.level || '-'} / ห้อง {source.room || '-'} • สมาชิก {(source.members || []).length} คน</p>
+                    <div className="flex flex-wrap gap-1.5 mt-3">
+                      {(source.members || []).map(mid => (
+                        <span key={mid} className="text-[11px] bg-gray-100 border border-gray-200 text-gray-700 px-2 py-1 rounded-full">{getStudentName(mid)}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <Button onClick={() => useGroupAsTemplate(source.id)} className="text-xs py-1.5 shrink-0"><Copy size={14}/> ใช้กลุ่มนี้</Button>
+                </div>
+              </div>
+            )) : (
+              <div className="text-center text-gray-500 py-10 border border-dashed border-gray-200 rounded-xl">
+                <Users size={34} className="mx-auto mb-2 text-gray-300"/>
+                <p className="font-medium">ยังไม่มีกลุ่มต้นแบบในรายการที่เลือก</p>
+                <p className="text-xs mt-1">ลองเลือกอาจารย์ท่านอื่น หรือให้อาจารย์สร้างกลุ่มก่อน</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </Modal>}
 
       <Modal isOpen={isGroupModalOpen} onClose={() => setIsGroupModalOpen(false)} title={groupForm.id ? 'แก้ไขกลุ่ม' : 'สร้างกลุ่มโครงงาน'}>
         <div className="space-y-4">
@@ -1037,7 +1241,11 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [role, setRole] = useState(null);
   const [loginId, setLoginId] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [pendingTeacherSetup, setPendingTeacherSetup] = useState(null);
+  const [firstPassword, setFirstPassword] = useState('');
+  const [confirmFirstPassword, setConfirmFirstPassword] = useState('');
   const [toast, setToast] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState({ isOpen: false, msg: '', onConfirm: null });
   const [promptDialog, setPromptDialog] = useState({ isOpen: false, title: '', onSubmit: null, value: '' });
@@ -1262,6 +1470,30 @@ export default function App() {
     }
   };
 
+  const completeTeacherFirstPassword = async () => {
+    if (!pendingTeacherSetup) return;
+    if (firstPassword.length < 6) return showToast('รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร', 'error');
+    if (firstPassword !== confirmFirstPassword) return showToast('ยืนยันรหัสผ่านไม่ตรงกัน', 'error');
+    const salt = makeSecuritySalt();
+    const passwordHash = await hashTeacherSecret(firstPassword, salt);
+    const nextUsers = db.users.map(u => u.role === 'teacher' && String(u.id) === String(pendingTeacherSetup.id) ? {
+      ...u,
+      teacherPasswordSet: true,
+      teacherPasswordHash: passwordHash,
+      teacherPasswordSalt: salt,
+      teacherTempHash: '',
+      teacherTempSalt: '',
+      teacherPasswordUpdatedAt: Date.now()
+    } : u);
+    const ok = await handleUpdate('users', nextUsers);
+    if (!ok) return;
+    const updated = { ...pendingTeacherSetup, teacherPasswordSet: true, teacherPasswordHash: passwordHash, teacherPasswordSalt: salt, teacherTempHash: '', teacherTempSalt: '' };
+    setCurrentUser(updated);
+    sessionStorage.setItem('dmd_web_session', JSON.stringify({ role: 'teacher', id: updated.id }));
+    setPendingTeacherSetup(null); setFirstPassword(''); setConfirmFirstPassword(''); setLoginPassword('');
+    showToast('ตั้งรหัสผ่านสำเร็จ');
+  };
+
   const handleLogin = async e => {
     e.preventDefault();
     try {
@@ -1287,6 +1519,22 @@ export default function App() {
       const user = fresh.users.find(u => u.role === role && String(u.id).trim().toLowerCase() === rawId.toLowerCase());
       if (!user) throw new Error('รหัสผู้ใช้งานไม่ถูกต้อง หรือยังไม่มีรหัสนี้ในระบบ');
 
+      if (role === 'teacher') {
+        if (!loginPassword) throw new Error('กรุณากรอกรหัสผ่าน');
+        if (user.teacherPasswordSet) {
+          if (!user.teacherPasswordHash || !user.teacherPasswordSalt) throw new Error('ข้อมูลรหัสผ่านไม่สมบูรณ์ กรุณาติดต่อผู้จัดการระบบ');
+          const givenHash = await hashTeacherSecret(loginPassword, user.teacherPasswordSalt);
+          if (givenHash !== user.teacherPasswordHash) throw new Error('รหัสผ่านไม่ถูกต้อง');
+        } else {
+          if (!user.teacherTempHash || !user.teacherTempSalt) throw new Error('บัญชีนี้ยังไม่ได้รับรหัสตั้งต้น กรุณาติดต่อผู้จัดการระบบ');
+          const tempHash = await hashTeacherSecret(loginPassword, user.teacherTempSalt);
+          if (tempHash !== user.teacherTempHash) throw new Error('รหัสตั้งต้นไม่ถูกต้อง');
+          setPendingTeacherSetup(user);
+          showToast('ยืนยันรหัสตั้งต้นแล้ว กรุณาตั้งรหัสผ่านส่วนตัว');
+          return;
+        }
+      }
+
       setCurrentUser(user);
       sessionStorage.setItem('dmd_web_session', JSON.stringify({ role, id: user.id }));
       showToast(`เข้าสู่ระบบสำเร็จ ยินดีต้อนรับ ${user.fname || ''}`);
@@ -1303,6 +1551,10 @@ export default function App() {
     setCurrentUser(null);
     setRole(null);
     setLoginId('');
+    setLoginPassword('');
+    setPendingTeacherSetup(null);
+    setFirstPassword('');
+    setConfirmFirstPassword('');
     setSearchQuery('');
     try {
       await ensureAnonymousSession();
@@ -1335,12 +1587,21 @@ export default function App() {
                   ? <Input label="ค้นหานักศึกษา" placeholder="กรอกรหัสนักศึกษา หรือ ชื่อ..." required value={searchQuery} onChange={e => setSearchQuery(e.target.value)}/>
                   : <Input label="รหัสผู้ใช้งาน" placeholder={role === 'admin' ? 'กรอก admin' : 'กรอกรหัส...'} required value={loginId} onChange={e => setLoginId(e.target.value)}/>
                 }
+                {role === 'teacher' && <Input label="รหัสผ่าน" type="password" placeholder="กรอกรหัสผ่าน หรือรหัสตั้งต้นครั้งแรก" required value={loginPassword} onChange={e=>setLoginPassword(e.target.value)}/>}
                 <Button type="submit" className="w-full mt-4">เข้าสู่ระบบ</Button>
-                <div className="text-xs text-gray-400 mt-6 pt-4 border-t text-center flex flex-col gap-1 items-center justify-center"><span className="flex items-center gap-1"><ShieldCheck size={14}/> ระบบพร้อมใช้งาน</span><span>{role === 'admin' ? 'รหัสผู้จัดการระบบ: admin' : role === 'parent' ? 'ค้นหาด้วยรหัสหรือชื่อนักศึกษา' : 'ใช้รหัสประจำตัวเข้าสู่ระบบได้โดยตรง'}</span></div>
+                <div className="text-xs text-gray-400 mt-6 pt-4 border-t text-center flex flex-col gap-1 items-center justify-center"><span className="flex items-center gap-1"><ShieldCheck size={14}/> ระบบพร้อมใช้งาน</span><span>{role === 'admin' ? 'รหัสผู้จัดการระบบ: admin' : role === 'parent' ? 'ค้นหาด้วยรหัสหรือชื่อนักศึกษา' : role === 'teacher' ? 'ใช้รหัสอาจารย์ + รหัสผ่านส่วนตัว' : 'ใช้รหัสประจำตัวเข้าสู่ระบบได้โดยตรง'}</span></div>
               </form>
             )}
           </div>
         </div>
+        <Modal isOpen={!!pendingTeacherSetup} onClose={()=>{}} title="ตั้งรหัสผ่านส่วนตัวครั้งแรก">
+          <div className="space-y-4">
+            <div className="bg-green-50 border border-green-100 rounded-xl p-4 text-sm text-green-800">ยืนยันรหัสตั้งต้นสำเร็จแล้ว กรุณาตั้งรหัสผ่านที่อาจารย์ต้องการใช้เอง ตั้งแต่ 6 ตัวอักษรขึ้นไป</div>
+            <Input label="รหัสผ่านใหม่" type="password" value={firstPassword} onChange={e=>setFirstPassword(e.target.value)} placeholder="อย่างน้อย 6 ตัวอักษร"/>
+            <Input label="ยืนยันรหัสผ่านใหม่" type="password" value={confirmFirstPassword} onChange={e=>setConfirmFirstPassword(e.target.value)} placeholder="กรอกรหัสผ่านเดิมอีกครั้ง"/>
+            <Button onClick={completeTeacherFirstPassword} className="w-full">บันทึกและเข้าสู่ระบบ</Button>
+          </div>
+        </Modal>
         {toast && <div className="fixed top-4 right-4 z-50"><div className={`px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 text-white font-medium ${toast.type === 'error' ? 'bg-red-500' : 'bg-gray-800'}`}>{toast.type === 'error' ? <AlertCircle size={20}/> : <CheckCircle size={20}/>} {toast.msg}</div></div>}
       </div>
     );
