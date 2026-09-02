@@ -30,6 +30,100 @@ const hasRejectedMilestone = (milestones) => {
   return milestones.some(m => m.status === 'rejected');
 };
 
+
+const toDateInputValue = (date = new Date()) => {
+  const d = new Date(date);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+const parseDateInput = (value) => {
+  if (!value) return null;
+  const [y, m, d] = String(value).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+};
+
+const formatThaiDate = (value) => {
+  const d = parseDateInput(value);
+  if (!d) return '-';
+  return new Intl.DateTimeFormat('th-TH', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+  }).format(d);
+};
+
+const addDaysToDateInput = (baseValue, days) => {
+  const base = parseDateInput(baseValue) || new Date();
+  base.setHours(0, 0, 0, 0);
+  base.setDate(base.getDate() + Number(days || 0));
+  return toDateInputValue(base);
+};
+
+const getDeadlineInfo = (milestone) => {
+  if (!milestone?.dueDate) return null;
+  if (milestone.status === 'approved') {
+    return {
+      diffDays: null,
+      text: 'อนุมัติแล้ว',
+      className: 'bg-green-50 text-green-700 border-green-200'
+    };
+  }
+
+  const due = parseDateInput(milestone.dueDate);
+  if (!due) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  due.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((due.getTime() - today.getTime()) / 86400000);
+
+  if (diffDays < 0) {
+    return {
+      diffDays,
+      text: `เกินกำหนด ${Math.abs(diffDays)} วัน`,
+      className: 'bg-red-50 text-red-700 border-red-200'
+    };
+  }
+  if (diffDays === 0) {
+    return {
+      diffDays,
+      text: 'ครบกำหนดวันนี้',
+      className: 'bg-red-50 text-red-700 border-red-200'
+    };
+  }
+  if (diffDays <= 3) {
+    return {
+      diffDays,
+      text: `เหลืออีก ${diffDays} วัน`,
+      className: 'bg-orange-50 text-orange-700 border-orange-200'
+    };
+  }
+  if (diffDays <= 7) {
+    return {
+      diffDays,
+      text: `เหลืออีก ${diffDays} วัน`,
+      className: 'bg-amber-50 text-amber-700 border-amber-200'
+    };
+  }
+  return {
+    diffDays,
+    text: `เหลืออีก ${diffDays} วัน`,
+    className: 'bg-blue-50 text-blue-700 border-blue-200'
+  };
+};
+
+const getNearestDeadlineMilestone = (milestones = []) => {
+  const candidates = milestones
+    .filter(m => m?.dueDate && m.status !== 'approved')
+    .map(m => ({ milestone: m, date: parseDateInput(m.dueDate) }))
+    .filter(x => x.date)
+    .sort((a, b) => a.date.getTime() - b.date.getTime());
+  return candidates[0]?.milestone || null;
+};
+
 const Card = ({ children, className = '' }) => (
   <div className={`bg-white rounded-xl border border-gray-100 shadow-sm p-6 ${className}`}>{children}</div>
 );
@@ -289,12 +383,31 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   const [activeGroupId, setActiveGroupId] = useState(null);
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
+  const [templateTeacherFilter, setTemplateTeacherFilter] = useState('all');
   const [groupForm, setGroupForm] = useState({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] });
   const [searchStudent, setSearchStudent] = useState('');
 
   const myGroups = adminMode ? db.groups : db.groups.filter(g => String(g.teacherId ?? '') === String(user.id ?? ''));
-  const myTemplates = adminMode ? (db.templates || []) : (db.templates?.filter(t => String(t.teacherId ?? '') === String(user.id ?? '')) || []);
+  const allTemplates = db.templates || [];
   const activeGroup = myGroups.find(g => g.id === activeGroupId);
+
+  const getTeacherDisplayName = (teacherId) => {
+    const teacher = db.users.find(u => u.role === 'teacher' && String(u.id ?? '') === String(teacherId ?? ''));
+    if (!teacher) return `รหัสอาจารย์ ${teacherId || '-'}`;
+    return `${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''}`.trim();
+  };
+
+  const teacherTemplateOptions = Array.from(new Set(allTemplates.map(t => String(t.teacherId ?? '')).filter(Boolean)))
+    .map(id => ({ value: id, label: getTeacherDisplayName(id) }))
+    .sort((a, b) => a.label.localeCompare(b.label, 'th'));
+
+  const visibleTemplates = allTemplates
+    .filter(t => templateTeacherFilter === 'all' || String(t.teacherId ?? '') === templateTeacherFilter)
+    .sort((a, b) => {
+      const nameCompare = getTeacherDisplayName(a.teacherId).localeCompare(getTeacherDisplayName(b.teacherId), 'th');
+      if (nameCompare !== 0) return nameCompare;
+      return String(a.name || '').localeCompare(String(b.name || ''), 'th');
+    });
 
   const getStudentName = (id) => {
     const s = db.users.find(u => String(u.id ?? '') === String(id ?? ''));
@@ -354,8 +467,43 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   };
 
   const addMilestone = () => {
-    const newM = { id: 'm' + Date.now(), order: activeGroup.milestones.length + 1, desc: 'รายการประเมินใหม่', percent: 0, status: 'pending' };
+    const newM = {
+      id: 'm' + Date.now(),
+      order: activeGroup.milestones.length + 1,
+      desc: 'รายการประเมินใหม่',
+      percent: 0,
+      status: 'pending',
+      assignDate: toDateInputValue(),
+      dueDate: ''
+    };
     updateMilestones(autoDistribute([...activeGroup.milestones, newM]));
+  };
+
+  const setMilestoneDate = (milestoneId, field, value) => {
+    const current = activeGroup.milestones.find(m => m.id === milestoneId);
+    if (!current) return;
+    const next = { ...current, [field]: value };
+
+    if (next.assignDate && next.dueDate) {
+      const assigned = parseDateInput(next.assignDate);
+      const due = parseDateInput(next.dueDate);
+      if (assigned && due && due.getTime() < assigned.getTime()) {
+        showToast('กำหนดส่งต้องเป็นวันเดียวกับหรือหลังวันที่สั่ง', 'error');
+        return;
+      }
+    }
+
+    updateMilestones(activeGroup.milestones.map(m => m.id === milestoneId ? next : m));
+  };
+
+  const setMilestoneDuration = (milestoneId, days) => {
+    const current = activeGroup.milestones.find(m => m.id === milestoneId);
+    if (!current) return;
+    const assignDate = current.assignDate || toDateInputValue();
+    const dueDate = addDaysToDateInput(assignDate, days);
+    updateMilestones(activeGroup.milestones.map(m =>
+      m.id === milestoneId ? { ...m, assignDate, dueDate } : m
+    ));
   };
 
   const setMilestoneStatus = (milestoneId, status) => {
@@ -386,7 +534,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   };
 
   const loadTemplate = (templateId) => {
-    const tpl = myTemplates.find(t => t.id === templateId);
+    const tpl = allTemplates.find(t => t.id === templateId);
     if (!tpl) return;
     
     const applyTpl = () => {
@@ -395,7 +543,9 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
         order: idx + 1,
         desc: m.desc,
         percent: m.percent,
-        status: 'pending'
+        status: 'pending',
+        assignDate: toDateInputValue(),
+        dueDate: ''
       }));
       updateMilestones(appliedMilestones);
       setIsTemplateModalOpen(false);
@@ -466,48 +616,87 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
               </div>
 
               <div className="space-y-3">
-                {activeGroup.milestones.map((m, idx) => (
-                  <div key={m.id} className={`flex flex-col xl:flex-row gap-3 items-start xl:items-center p-3 rounded-lg border 
-                    ${m.status === 'approved' ? 'bg-green-50/50 border-green-200' : 
+                {activeGroup.milestones.map((m, idx) => {
+                  const deadline = getDeadlineInfo(m);
+                  return (
+                  <div key={m.id} className={`p-4 rounded-xl border space-y-3
+                    ${m.status === 'approved' ? 'bg-green-50/50 border-green-200' :
                       m.status === 'rejected' ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}`}>
-                    
-                    <div className="flex-grow w-full flex items-center gap-3">
-                       <span className="text-sm font-bold text-gray-400 w-4">{idx + 1}.</span>
-                       <input 
-                        type="text" value={m.desc} placeholder="รายละเอียด..."
-                        onChange={(e) => updateMilestones(activeGroup.milestones.map(mx => mx.id === m.id ? {...mx, desc: e.target.value} : mx))}
-                        className="flex-grow bg-transparent border-b border-transparent focus:border-blue-500 outline-none py-1 text-sm font-medium w-full min-w-0"
-                      />
-                    </div>
-                    
-                    <div className="flex items-center gap-2 flex-wrap w-full xl:w-auto justify-between xl:justify-end pl-7 xl:pl-0">
-                      <div className="flex items-center">
-                        <input 
-                          type="number" value={m.percent}
-                          onChange={(e) => updateMilestones(activeGroup.milestones.map(mx => mx.id === m.id ? {...mx, percent: Number(e.target.value)} : mx))}
-                          className="w-14 text-center border border-gray-300 rounded py-1 text-sm outline-none focus:border-blue-500 bg-white"
+
+                    <div className="flex flex-col xl:flex-row gap-3 xl:items-center">
+                      <div className="flex-grow w-full flex items-center gap-3">
+                        <span className="text-sm font-bold text-gray-400 w-5">{idx + 1}.</span>
+                        <input
+                          type="text" value={m.desc} placeholder="รายละเอียด..."
+                          onChange={(e) => updateMilestones(activeGroup.milestones.map(mx => mx.id === m.id ? {...mx, desc: e.target.value} : mx))}
+                          className="flex-grow bg-white/70 border border-gray-200 focus:border-blue-500 outline-none rounded-lg px-3 py-2 text-sm font-medium w-full min-w-0"
                         />
-                        <span className="text-gray-500 ml-1 text-sm">%</span>
                       </div>
-                      
-                      <div className="flex bg-gray-200/50 rounded-lg p-0.5 border border-gray-200">
-                        <button onClick={() => setMilestoneStatus(m.id, 'pending')} 
-                                className={`px-2 py-1 rounded-md text-xs font-medium flex items-center gap-1 ${m.status === 'pending' ? 'bg-white shadow-sm text-gray-800' : 'text-gray-500 hover:text-gray-700'}`}>
-                          <Clock size={14}/> รอตรวจ
-                        </button>
-                        <button onClick={() => setMilestoneStatus(m.id, 'approved')} 
-                                className={`px-2 py-1 rounded-md text-xs font-medium flex items-center gap-1 ${m.status === 'approved' ? 'bg-green-500 text-white shadow-sm' : 'text-gray-500 hover:text-green-600'}`}>
-                          <Check size={14}/> อนุมัติ
-                        </button>
-                        <button onClick={() => setMilestoneStatus(m.id, 'rejected')} 
-                                className={`px-2 py-1 rounded-md text-xs font-medium flex items-center gap-1 ${m.status === 'rejected' ? 'bg-red-500 text-white shadow-sm' : 'text-gray-500 hover:text-red-600'}`}>
-                          <XCircle size={14}/> ไม่อนุมัติ
-                        </button>
+
+                      <div className="flex items-center gap-2 flex-wrap xl:flex-nowrap pl-8 xl:pl-0">
+                        <div className="flex items-center">
+                          <input
+                            type="number" value={m.percent}
+                            onChange={(e) => updateMilestones(activeGroup.milestones.map(mx => mx.id === m.id ? {...mx, percent: Number(e.target.value)} : mx))}
+                            className="w-16 text-center border border-gray-300 rounded-lg py-2 text-sm outline-none focus:border-blue-500 bg-white"
+                          />
+                          <span className="text-gray-500 ml-1 text-sm">%</span>
+                        </div>
+
+                        <div className="flex bg-gray-200/50 rounded-lg p-0.5 border border-gray-200">
+                          <button onClick={() => setMilestoneStatus(m.id, 'pending')}
+                                  className={`px-2 py-1.5 rounded-md text-xs font-medium flex items-center gap-1 ${m.status === 'pending' ? 'bg-white shadow-sm text-gray-800' : 'text-gray-500 hover:text-gray-700'}`}>
+                            <Clock size={14}/> รอตรวจ
+                          </button>
+                          <button onClick={() => setMilestoneStatus(m.id, 'approved')}
+                                  className={`px-2 py-1.5 rounded-md text-xs font-medium flex items-center gap-1 ${m.status === 'approved' ? 'bg-green-500 text-white shadow-sm' : 'text-gray-500 hover:text-green-600'}`}>
+                            <Check size={14}/> อนุมัติ
+                          </button>
+                          <button onClick={() => setMilestoneStatus(m.id, 'rejected')}
+                                  className={`px-2 py-1.5 rounded-md text-xs font-medium flex items-center gap-1 ${m.status === 'rejected' ? 'bg-red-500 text-white shadow-sm' : 'text-gray-500 hover:text-red-600'}`}>
+                            <XCircle size={14}/> ไม่อนุมัติ
+                          </button>
+                        </div>
+                        <button onClick={() => deleteMilestone(m.id)} className="text-gray-400 hover:text-red-500 p-1"><X size={16}/></button>
                       </div>
-                      <button onClick={() => deleteMilestone(m.id)} className="text-gray-400 hover:text-red-500 p-1"><X size={16}/></button>
                     </div>
+
+                    <div className="pl-8 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[1fr_1fr_auto] gap-3 items-end">
+                      <Input
+                        label="วันที่สั่ง"
+                        type="date"
+                        value={m.assignDate || ''}
+                        onChange={(e) => setMilestoneDate(m.id, 'assignDate', e.target.value)}
+                      />
+                      <Input
+                        label="กำหนดส่ง"
+                        type="date"
+                        value={m.dueDate || ''}
+                        onChange={(e) => setMilestoneDate(m.id, 'dueDate', e.target.value)}
+                      />
+                      <div className="flex flex-col gap-1">
+                        <span className="text-sm font-medium text-gray-700">กำหนดระยะเวลาเร็ว</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {[3, 7, 14, 30].map(days => (
+                            <button key={days} onClick={() => setMilestoneDuration(m.id, days)}
+                              className="px-2.5 py-2 text-xs rounded-lg border border-gray-200 bg-white hover:border-blue-300 hover:text-blue-600">
+                              {days} วัน
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {(m.assignDate || m.dueDate) && (
+                      <div className="pl-8 flex flex-wrap gap-2 text-xs items-center">
+                        {m.assignDate && <span className="text-gray-500">วันที่สั่ง: <b className="text-gray-700">{formatThaiDate(m.assignDate)}</b></span>}
+                        {m.dueDate && <span className="text-gray-500">กำหนดส่ง: <b className="text-gray-700">{formatThaiDate(m.dueDate)}</b></span>}
+                        {deadline && <span className={`px-2.5 py-1 rounded-full border font-semibold ${deadline.className}`}><Clock size={12} className="inline mr-1"/>{deadline.text}</span>}
+                      </div>
+                    )}
                   </div>
-                ))}
+                  );
+                })}
                 
                 <div className="flex justify-end pt-2 text-sm">
                   <span className={`font-medium ${activeGroup.milestones.reduce((s, m)=>s+Number(m.percent),0) === 100 ? 'text-green-600' : 'text-amber-500'}`}>
@@ -580,17 +769,36 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
       </Modal>
 
       <Modal isOpen={isTemplateModalOpen} onClose={() => setIsTemplateModalOpen(false)} title="เลือกเทมเพลตรายการประเมิน">
-         <div className="space-y-3">
-            {myTemplates.length > 0 ? myTemplates.map(tpl => (
-              <div key={tpl.id} className="border border-gray-200 p-4 rounded-lg hover:border-blue-300 transition-colors flex justify-between items-center">
+         <div className="space-y-4">
+            <div className="bg-gray-50 border border-gray-200 rounded-xl p-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">เลือกจากอาจารย์</label>
+              <select
+                value={templateTeacherFilter}
+                onChange={e => setTemplateTeacherFilter(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-4 py-2.5 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="all">อาจารย์ทั้งหมด</option>
+                {teacherTemplateOptions.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-2">สามารถเลือกใช้เทมเพลตของอาจารย์ท่านอื่นได้ โดยต้นฉบับจะไม่ถูกแก้ไข</p>
+            </div>
+
+            {visibleTemplates.length > 0 ? visibleTemplates.map(tpl => (
+              <div key={tpl.id} className="border border-gray-200 p-4 rounded-lg hover:border-blue-300 transition-colors flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
                  <div>
                     <p className="font-semibold text-gray-800">{tpl.name}</p>
-                    <p className="text-xs text-gray-500">{tpl.milestones.length} รายการประเมิน</p>
+                    <p className="text-xs text-blue-600 mt-1">เจ้าของ: {getTeacherDisplayName(tpl.teacherId)}</p>
+                    <p className="text-xs text-gray-500 mt-1">{tpl.milestones?.length || 0} รายการประเมิน</p>
                  </div>
-                 <Button onClick={() => loadTemplate(tpl.id)} className="text-xs py-1.5">ใช้งาน</Button>
+                 <Button onClick={() => loadTemplate(tpl.id)} className="text-xs py-1.5 shrink-0">ใช้เทมเพลตนี้</Button>
               </div>
             )) : (
-              <p className="text-center text-gray-500 py-8">ยังไม่มีเทมเพลตที่บันทึกไว้</p>
+              <div className="text-center text-gray-500 py-8">
+                <p className="font-medium">ยังไม่มีเทมเพลตในรายการที่เลือก</p>
+                <p className="text-xs mt-1">เลือกอาจารย์ท่านอื่น หรือบันทึกเทมเพลตใหม่ก่อน</p>
+              </div>
             )}
          </div>
       </Modal>
@@ -715,6 +923,8 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
             {myProjects.map(group => {
               const prog = calculateGroupProgress(group.milestones);
               const isRejected = hasRejectedMilestone(group.milestones);
+              const nearestDeadlineMilestone = getNearestDeadlineMilestone(group.milestones || []);
+              const nearestDeadline = nearestDeadlineMilestone ? getDeadlineInfo(nearestDeadlineMilestone) : null;
 
               return (
                 <Card key={group.id} className={isRejected ? 'border-red-300 ring-1 ring-red-100' : ''}>
@@ -730,28 +940,61 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
                     </div>
                   </div>
 
+                  {nearestDeadlineMilestone && nearestDeadline && (
+                    <div className={`mb-4 p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 ${nearestDeadline.className}`}>
+                      <div className="flex items-start gap-2">
+                        <Clock size={18} className="mt-0.5 flex-shrink-0"/>
+                        <div>
+                          <p className="text-sm font-semibold">งานที่ต้องติดตาม: {nearestDeadlineMilestone.desc}</p>
+                          <p className="text-xs opacity-80 mt-0.5">กำหนดส่ง {formatThaiDate(nearestDeadlineMilestone.dueDate)}</p>
+                        </div>
+                      </div>
+                      <span className="text-sm font-bold whitespace-nowrap">{nearestDeadline.text}</span>
+                    </div>
+                  )}
+
                   <div className="mb-6">
                     <ProgressBar percent={prog} />
                   </div>
 
                   <div className="space-y-2">
                     <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">รายละเอียดการประเมิน</p>
-                    {group.milestones.length > 0 ? group.milestones.map((m, idx) => (
-                      <div key={m.id} className="flex gap-3 items-center p-2.5 bg-gray-50 rounded-lg text-sm">
-                        <div className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-white 
-                          ${m.status === 'approved' ? 'bg-green-500' : m.status === 'rejected' ? 'bg-red-500' : 'bg-gray-300'}`}>
-                          {m.status === 'approved' ? <Check size={14}/> : m.status === 'rejected' ? <X size={14}/> : <Clock size={14}/>}
-                        </div>
-                        <div className="flex-grow">
-                          <p className={`font-medium ${m.status === 'rejected' ? 'text-red-600 line-through opacity-80' : 'text-gray-700'}`}>{m.desc}</p>
-                        </div>
-                        <div className="flex-shrink-0 text-xs">
-                           {m.status === 'approved' && <span className="text-green-600 font-bold">+{m.percent}%</span>}
-                           {m.status === 'rejected' && <span className="text-red-500 font-bold bg-red-100 px-2 py-0.5 rounded">ไม่อนุมัติ</span>}
-                           {m.status === 'pending' && <span className="text-gray-400">รอตรวจ</span>}
+                    {group.milestones.length > 0 ? group.milestones.map((m, idx) => {
+                      const deadline = getDeadlineInfo(m);
+                      return (
+                      <div key={m.id} className={`p-3 rounded-lg text-sm border ${
+                        deadline?.diffDays != null && deadline.diffDays < 0 && m.status !== 'approved'
+                          ? 'bg-red-50/60 border-red-200'
+                          : 'bg-gray-50 border-gray-100'
+                      }`}>
+                        <div className="flex gap-3 items-start">
+                          <div className={`flex-shrink-0 w-6 h-6 mt-0.5 rounded-full flex items-center justify-center text-white
+                            ${m.status === 'approved' ? 'bg-green-500' : m.status === 'rejected' ? 'bg-red-500' : 'bg-gray-300'}`}>
+                            {m.status === 'approved' ? <Check size={14}/> : m.status === 'rejected' ? <X size={14}/> : <Clock size={14}/>}
+                          </div>
+                          <div className="flex-grow min-w-0">
+                            <p className={`font-medium ${m.status === 'rejected' ? 'text-red-600 line-through opacity-80' : 'text-gray-700'}`}>{m.desc}</p>
+                            {(m.assignDate || m.dueDate) && (
+                              <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1.5 text-xs text-gray-500">
+                                {m.assignDate && <span>วันที่สั่ง: {formatThaiDate(m.assignDate)}</span>}
+                                {m.dueDate && <span>กำหนดส่ง: <b className="text-gray-700">{formatThaiDate(m.dueDate)}</b></span>}
+                              </div>
+                            )}
+                            {deadline && (
+                              <span className={`inline-flex items-center gap-1 mt-2 px-2.5 py-1 rounded-full border text-xs font-semibold ${deadline.className}`}>
+                                <Clock size={12}/> {deadline.text}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex-shrink-0 text-xs">
+                             {m.status === 'approved' && <span className="text-green-600 font-bold">+{m.percent}%</span>}
+                             {m.status === 'rejected' && <span className="text-red-500 font-bold bg-red-100 px-2 py-0.5 rounded">ไม่อนุมัติ</span>}
+                             {m.status === 'pending' && <span className="text-gray-400">รอตรวจ</span>}
+                          </div>
                         </div>
                       </div>
-                    )) : <p className="text-sm text-gray-400 text-center py-2">อาจารย์ยังไม่ได้กำหนดรายการประเมิน</p>}
+                      );
+                    }) : <p className="text-sm text-gray-400 text-center py-2">อาจารย์ยังไม่ได้กำหนดรายการประเมิน</p>}
                   </div>
 
                   {!isParent && (
