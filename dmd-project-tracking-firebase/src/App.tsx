@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { onAuthStateChanged, signInAnonymously, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from 'firebase/firestore';
 import { auth, db as firestore } from './firebase';
 import { 
@@ -1053,6 +1053,9 @@ export default function App() {
   const clean = value => JSON.parse(JSON.stringify(value ?? null));
   const loginKey = value => Array.from(String(value || '').trim().toLowerCase()).map(ch => /[a-z0-9]/.test(ch) ? ch : `x${ch.codePointAt(0).toString(16)}`).join('');
   const loginDocId = (userRole, id) => `${userRole}_${loginKey(id)}`;
+  const AUTH_VERSION = 'v5';
+  const authEmailFor = (userRole, id) => `${AUTH_VERSION}.${userRole}.${loginKey(id)}@dmd.example.com`;
+  const authPasswordFor = (userRole, id) => `DMD#${userRole === 'teacher' ? 'T' : 'S'}#${loginKey(id)}#2026!`;
   const ADMIN_EMAIL = 'admin@dmd.example.com';
 
   const getDocsArray = async (name, qRef = null) => {
@@ -1104,12 +1107,12 @@ export default function App() {
     }
   };
 
-  const getSession = async uid => {
-    const snap = await getDoc(doc(firestore, 'sessions', uid));
+  const getAuthProfile = async uid => {
+    const snap = await getDoc(doc(firestore, 'authProfiles', uid));
     return snap.exists() ? { ...snap.data(), _docId: snap.id } : null;
   };
 
-  const loadPrivate = async (firebaseUser, userRole, knownSession = null) => {
+  const loadPrivate = async (firebaseUser, userRole, knownProfile = null) => {
     if (userRole === 'admin') {
       const [usersRaw, groupsRaw, templatesRaw, submissionsRaw, catSnap] = await Promise.all([
         getDocsArray('users'), getDocsArray('groups'), getDocsArray('templates'), getDocsArray('submissions'), getDoc(doc(firestore, 'catalogs', 'default'))
@@ -1119,14 +1122,19 @@ export default function App() {
       return users.find(u => u.role === 'admin' && (u._docId === firebaseUser.uid || u.uid === firebaseUser.uid)) || null;
     }
 
-    const session = knownSession || await getSession(firebaseUser.uid);
-    if (!session || session.role !== userRole || !session.userDocId) return null;
+    const profile = knownProfile || await getAuthProfile(firebaseUser.uid);
+    if (!profile || profile.role !== userRole || !profile.userDocId || profile.active === false) return null;
 
-    const ownSnap = await getDoc(doc(firestore, 'users', session.userDocId));
+    const indexSnap = await getDoc(doc(firestore, 'loginIndex', profile.loginKey));
+    if (!indexSnap.exists()) return null;
+    const indexData = indexSnap.data();
+    if (indexData.active === false || indexData.role !== userRole || String(indexData.id) !== String(profile.id) || indexData.userDocId !== profile.userDocId) return null;
+
+    const ownSnap = await getDoc(doc(firestore, 'users', profile.userDocId));
     if (!ownSnap.exists()) return null;
     const ownData = ownSnap.data();
     const own = { ...ownData, id: ownData.id != null ? String(ownData.id) : ownData.id, _docId: ownSnap.id, uid: ownSnap.id };
-    if (own.role !== userRole || own.active === false || String(own.id) !== String(session.id)) return null;
+    if (own.role !== userRole || own.active === false || String(own.id) !== String(profile.id)) return null;
 
     if (userRole === 'teacher') {
       const [usersRaw, groupsRaw, templatesRaw, submissionsRaw, catSnap] = await Promise.all([
@@ -1134,11 +1142,11 @@ export default function App() {
       ]);
       const users = usersRaw.filter(u => u.role !== 'disabled' && u.active !== false).map(u => ({ ...u, id: u.id != null ? String(u.id) : u.id, uid: u._docId }));
       setDb({ users, groups: groupsRaw, templates: templatesRaw, submissions: submissionsRaw, catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS } });
-      return users.find(u => u._docId === session.userDocId) || own;
+      return users.find(u => u._docId === profile.userDocId) || own;
     }
 
-    const groupsRaw = await getDocsArray('groups', query(collection(firestore, 'groups'), where('members', 'array-contains', session.id)));
-    const submissionsRaw = await getDocsArray('submissions', query(collection(firestore, 'submissions'), where('studentId', '==', session.id)));
+    const groupsRaw = await getDocsArray('groups', query(collection(firestore, 'groups'), where('members', 'array-contains', String(profile.id))));
+    const submissionsRaw = await getDocsArray('submissions', query(collection(firestore, 'submissions'), where('studentId', '==', String(profile.id))));
     const teachers = groupsRaw.map(g => ({ id: String(g.teacherId ?? ''), role: 'teacher', title: '', fname: g.teacherName || 'อาจารย์ผู้ควบคุม', lname: '' })).filter((v,i,a) => v.id && a.findIndex(x => x.id === v.id) === i);
     const catSnap = await getDoc(doc(firestore, 'catalogs', 'default'));
     setDb({ users: [own, ...teachers], groups: groupsRaw, templates: [], submissions: submissionsRaw, catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS } });
@@ -1161,11 +1169,11 @@ export default function App() {
           if (!cancelled && loaded) { setRole('admin'); setCurrentUser(loaded); }
           return;
         }
-        if (firebaseUser.isAnonymous) {
-          const session = await getSession(firebaseUser.uid);
-          if (!session || !['student','teacher'].includes(session.role)) return;
-          const loaded = await loadPrivate(firebaseUser, session.role, session);
-          if (!cancelled && loaded) { setRole(session.role); setCurrentUser(loaded); }
+        if (firebaseUser.email && firebaseUser.email.startsWith(`${AUTH_VERSION}.`)) {
+          const profile = await getAuthProfile(firebaseUser.uid);
+          if (!profile || !['student','teacher'].includes(profile.role)) return;
+          const loaded = await loadPrivate(firebaseUser, profile.role, profile);
+          if (!cancelled && loaded) { setRole(profile.role); setCurrentUser(loaded); }
         }
       } catch (e) { console.error('restore session', e); }
     });
@@ -1188,6 +1196,7 @@ export default function App() {
         id: normalizedId,
         role: u.role,
         userDocId: u._docId,
+        authEmail: authEmailFor(u.role, normalizedId),
         active: true,
         updatedAt: Date.now()
       });
@@ -1245,7 +1254,7 @@ export default function App() {
       delete profile.email;
       await setDoc(doc(firestore, 'users', docId), profile, { merge: true });
       const key = loginDocId(u.role, u.id);
-      await setDoc(doc(firestore, 'loginIndex', key), { loginKey:key, id:String(u.id), role:u.role, userDocId:docId, active:true, updatedAt:Date.now() });
+      await setDoc(doc(firestore, 'loginIndex', key), { loginKey:key, id:String(u.id), role:u.role, userDocId:docId, authEmail:authEmailFor(u.role, u.id), active:true, updatedAt:Date.now() });
       if (u.role === 'student') {
         await setDoc(doc(firestore, 'publicStudents', String(u.id)), { id:String(u.id), title:u.title||'', fname:u.fname||'', lname:u.lname||'', level:u.level||'', room:u.room||'', role:'student' });
       }
@@ -1393,21 +1402,48 @@ export default function App() {
       const indexSnap = await getDoc(doc(firestore, 'loginIndex', key));
       if (!indexSnap.exists()) throw new Error('ไม่พบรหัสนี้ในระบบ');
       const indexData = indexSnap.data();
-      if (indexData.active === false || indexData.role !== role || String(indexData.id) !== rawId) throw new Error('รหัสนี้ไม่สามารถเข้าใช้งานได้');
+      if (indexData.active === false || indexData.role !== role || String(indexData.id) !== rawId || !indexData.userDocId) throw new Error('รหัสนี้ไม่สามารถเข้าใช้งานได้');
 
+      const email = indexData.authEmail || authEmailFor(role, rawId);
+      const password = authPasswordFor(role, rawId);
       if (auth.currentUser) {
         try { await signOut(auth); } catch (_) {}
       }
-      const cred = await signInAnonymously(auth);
-      const session = { loginKey:key, id:rawId, role, userDocId:indexData.userDocId, active:true, createdAt:Date.now() };
-      await setDoc(doc(firestore, 'sessions', cred.user.uid), session);
-      const loaded = await loadPrivate(cred.user, role, session);
+
+      let cred;
+      try {
+        cred = await signInWithEmailAndPassword(auth, email, password);
+      } catch (signInErr) {
+        const recoverable = ['auth/invalid-credential', 'auth/user-not-found', 'auth/wrong-password', 'auth/invalid-login-credentials'].includes(signInErr?.code);
+        if (!recoverable) throw signInErr;
+        try {
+          cred = await createUserWithEmailAndPassword(auth, email, password);
+        } catch (createErr) {
+          if (createErr?.code === 'auth/email-already-in-use') {
+            cred = await signInWithEmailAndPassword(auth, email, password);
+          } else {
+            throw createErr;
+          }
+        }
+      }
+
+      const profile = {
+        loginKey: key,
+        id: rawId,
+        role,
+        userDocId: indexData.userDocId,
+        authEmail: email,
+        active: true,
+        updatedAt: Date.now()
+      };
+      await setDoc(doc(firestore, 'authProfiles', cred.user.uid), profile, { merge: true });
+      const loaded = await loadPrivate(cred.user, role, profile);
       if (!loaded) throw new Error('ไม่พบข้อมูลผู้ใช้งาน');
       setCurrentUser(loaded);
       showToast(`เข้าสู่ระบบสำเร็จ ยินดีต้อนรับ ${loaded.fname || ''}`);
     } catch (err) {
       console.error(err);
-      if (role !== 'admin' && auth.currentUser?.isAnonymous) {
+      if (role !== 'admin' && auth.currentUser) {
         try { await signOut(auth); } catch (_) {}
       }
       showToast(role === 'admin' ? 'รหัสผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง' : (err?.message || 'ไม่สามารถเข้าสู่ระบบได้'), 'error');
@@ -1416,9 +1452,6 @@ export default function App() {
 
   const logout = async () => {
     try {
-      if (auth.currentUser?.isAnonymous) {
-        try { await deleteDoc(doc(firestore, 'sessions', auth.currentUser.uid)); } catch (_) {}
-      }
       await signOut(auth);
     } catch (_) {}
     setCurrentUser(null); setRole(null); setLoginId(''); setLoginPassword(''); setSearchQuery('');
