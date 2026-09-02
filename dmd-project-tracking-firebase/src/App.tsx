@@ -289,39 +289,52 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   const [activeGroupId, setActiveGroupId] = useState(null);
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
-  const [groupForm, setGroupForm] = useState({ id: '', name: '', teacherId: adminMode ? '' : user.id, level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] });
+  const [groupForm, setGroupForm] = useState({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] });
   const [searchStudent, setSearchStudent] = useState('');
 
-  const myGroups = adminMode ? db.groups : db.groups.filter(g => g.teacherId === user.id);
-  const myTemplates = adminMode ? (db.templates || []) : (db.templates?.filter(t => t.teacherId === user.id) || []);
+  const myGroups = adminMode ? db.groups : db.groups.filter(g => String(g.teacherId ?? '') === String(user.id ?? ''));
+  const myTemplates = adminMode ? (db.templates || []) : (db.templates?.filter(t => String(t.teacherId ?? '') === String(user.id ?? '')) || []);
   const activeGroup = myGroups.find(g => g.id === activeGroupId);
 
   const getStudentName = (id) => {
-    const s = db.users.find(u => u.id === id);
+    const s = db.users.find(u => String(u.id ?? '') === String(id ?? ''));
     return s ? `${s.fname} ${s.lname}` : id;
   };
 
-  const handleSaveGroup = () => {
+  const handleSaveGroup = async () => {
     if(!groupForm.name) return showToast('กรุณากรอกชื่อกลุ่ม', 'error');
     if(groupForm.members.length > 6) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 6 คน', 'error');
     if(adminMode && !groupForm.teacherId) return showToast('กรุณาเลือกอาจารย์ผู้ควบคุม', 'error');
+
+    const normalizedGroup = {
+      ...groupForm,
+      teacherId: String(adminMode ? groupForm.teacherId : user.id ?? ''),
+      members: (groupForm.members || []).map(id => String(id))
+    };
+
     let newGroups = [...db.groups];
-    if (groupForm.id) {
-      newGroups = newGroups.map(g => g.id === groupForm.id ? groupForm : g);
-      showToast('อัปเดตกลุ่มสำเร็จ');
+    let nextActiveId = normalizedGroup.id;
+    const isEdit = !!normalizedGroup.id;
+
+    if (isEdit) {
+      newGroups = newGroups.map(g => g.id === normalizedGroup.id ? normalizedGroup : g);
     } else {
-      const newId = 'g' + Date.now();
-      newGroups.push({ ...groupForm, id: newId, teacherId: adminMode ? groupForm.teacherId : user.id });
-      setActiveGroupId(newId);
-      showToast('สร้างกลุ่มโครงงานสำเร็จ');
+      nextActiveId = 'g' + Date.now();
+      newGroups.push({ ...normalizedGroup, id: nextActiveId });
     }
-    handleUpdate('groups', newGroups);
+
+    const ok = await handleUpdate('groups', newGroups);
+    if (!ok) return;
+
+    setActiveGroupId(nextActiveId);
     setIsGroupModalOpen(false);
+    showToast(isEdit ? 'อัปเดตกลุ่มสำเร็จ' : 'สร้างกลุ่มโครงงานสำเร็จ');
   };
 
   const handleDeleteGroup = () => {
-    askConfirm('คุณแน่ใจหรือไม่ว่าต้องการลบกลุ่มโครงงานนี้? ข้อมูลการประเมินทั้งหมดจะหายไป', () => {
-      handleUpdate('groups', db.groups.filter(g => g.id !== activeGroup.id));
+    askConfirm('คุณแน่ใจหรือไม่ว่าต้องการลบกลุ่มโครงงานนี้? ข้อมูลการประเมินทั้งหมดจะหายไป', async () => {
+      const ok = await handleUpdate('groups', db.groups.filter(g => g.id !== activeGroup.id));
+      if (!ok) return;
       setActiveGroupId(null);
       showToast('ลบกลุ่มโครงงานสำเร็จ');
     });
@@ -359,16 +372,16 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   const saveAsTemplate = () => {
     if (!activeGroup || activeGroup.milestones.length === 0) return showToast('ไม่มีรายการประเมินให้บันทึก', 'error');
     
-    askPrompt('กรุณาตั้งชื่อเทมเพลต', (name) => {
+    askPrompt('กรุณาตั้งชื่อเทมเพลต', async (name) => {
       if(!name) return;
       const newTemplate = {
         id: 'tpl' + Date.now(),
-        teacherId: adminMode ? activeGroup.teacherId : user.id,
+        teacherId: String(adminMode ? activeGroup.teacherId : user.id ?? ''),
         name: name,
         milestones: activeGroup.milestones.map(m => ({ desc: m.desc, percent: m.percent })) 
       };
-      handleUpdate('templates', [...(db.templates || []), newTemplate]);
-      showToast('บันทึกเทมเพลตสำเร็จ');
+      const ok = await handleUpdate('templates', [...(db.templates || []), newTemplate]);
+      if (ok) showToast('บันทึกเทมเพลตสำเร็จ');
     });
   };
 
@@ -401,7 +414,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
       <div className="w-full md:w-1/3 flex flex-col gap-4">
         <div className="flex justify-between items-center">
           <h2 className="text-xl font-bold text-gray-800">{adminMode ? 'กลุ่มโครงงานทั้งหมด' : 'กลุ่มโครงงานของฉัน'}</h2>
-          <Button onClick={() => { setGroupForm({ id: '', name: '', teacherId: adminMode ? '' : user.id, level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] }); setIsGroupModalOpen(true); }} className="py-1.5 px-3 text-sm"><Plus size={16}/> สร้าง</Button>
+          <Button onClick={() => { setGroupForm({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] }); setIsGroupModalOpen(true); }} className="py-1.5 px-3 text-sm"><Plus size={16}/> สร้าง</Button>
         </div>
         <div className="space-y-3">
           {myGroups.map(group => (
@@ -530,7 +543,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
       <Modal isOpen={isGroupModalOpen} onClose={() => setIsGroupModalOpen(false)} title={groupForm.id ? 'แก้ไขกลุ่ม' : 'สร้างกลุ่มโครงงาน'}>
         <div className="space-y-4">
           <Input label="ชื่อกลุ่มโครงงาน / หัวข้อที่รับผิดชอบ" value={groupForm.name} onChange={e => setGroupForm({...groupForm, name: e.target.value})} placeholder="เช่น โครงงานระบบร้านค้า (ส่วน Frontend)" />
-          {adminMode && <Select label="อาจารย์ผู้ควบคุม" value={groupForm.teacherId || ''} onChange={e => setGroupForm({...groupForm, teacherId:e.target.value})} options={db.users.filter(u=>u.role==='teacher').map(t=>({value:t.id,label:`${t.title}${t.fname} ${t.lname} (${t.id})`}))} placeholder="เลือกอาจารย์ผู้ควบคุม" />}
+          {adminMode && <Select label="อาจารย์ผู้ควบคุม" value={groupForm.teacherId || ''} onChange={e => setGroupForm({...groupForm, teacherId:e.target.value})} options={db.users.filter(u=>u.role==='teacher').map(t=>({value:String(t.id ?? ''),label:`${t.title}${t.fname} ${t.lname} (${t.id})`}))} placeholder="เลือกอาจารย์ผู้ควบคุม" />}
           <div className="grid grid-cols-2 gap-4">
             <Select label="ระดับชั้น" value={groupForm.level} onChange={e => setGroupForm({...groupForm, level: e.target.value, members: []})} options={LEVELS} />
             <Select label="ห้อง" value={groupForm.room} onChange={e => setGroupForm({...groupForm, room: e.target.value, members: []})} options={ROOMS} />
@@ -541,7 +554,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
               {groupForm.members.map(mid => (
                 <div key={mid} className="bg-blue-50 border border-blue-200 text-blue-800 text-xs px-2 py-1 rounded-md flex items-center gap-1">
                   {getStudentName(mid)}
-                  <button onClick={() => setGroupForm(p => ({...p, members: p.members.filter(id=>id!==mid)}))} className="text-blue-400 hover:text-red-500"><X size={14}/></button>
+                  <button onClick={() => setGroupForm(p => ({...p, members: p.members.filter(id=>String(id)!==String(mid))}))} className="text-blue-400 hover:text-red-500"><X size={14}/></button>
                 </div>
               ))}
             </div>
@@ -551,12 +564,12 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
             />
             {searchStudent && (
               <div className="mt-1 border border-gray-200 rounded-lg shadow-sm max-h-40 overflow-y-auto bg-white">
-                {db.users.filter(u => { const q=searchStudent.toLowerCase(); return u.role === 'student' && u.level === groupForm.level && u.room === groupForm.room && !groupForm.members.includes(u.id) && (`${u.id} ${u.fname} ${u.lname}`.toLowerCase().includes(q)); }).map(student => (
-                  <div key={student.id} onClick={() => { if(groupForm.members.length>=6) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 6 คน','error'); setGroupForm(p => ({...p, members: [...p.members, student.id]})); setSearchStudent(''); }} className="px-4 py-2 hover:bg-gray-50 cursor-pointer text-sm">
+                {db.users.filter(u => { const q=searchStudent.toLowerCase(); return u.role === 'student' && u.level === groupForm.level && u.room === groupForm.room && !groupForm.members.some(mid => String(mid) === String(u.id)) && (`${u.id} ${u.fname} ${u.lname}`.toLowerCase().includes(q)); }).map(student => (
+                  <div key={student.id} onClick={() => { if(groupForm.members.length>=6) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 6 คน','error'); setGroupForm(p => ({...p, members: [...p.members, String(student.id)]})); setSearchStudent(''); }} className="px-4 py-2 hover:bg-gray-50 cursor-pointer text-sm">
                     {student.fname} {student.lname} ({student.id})
                   </div>
                 ))}
-                {db.users.filter(u => { const q=searchStudent.toLowerCase(); return u.role === 'student' && u.level === groupForm.level && u.room === groupForm.room && !groupForm.members.includes(u.id) && (`${u.id} ${u.fname} ${u.lname}`.toLowerCase().includes(q)); }).length === 0 && (
+                {db.users.filter(u => { const q=searchStudent.toLowerCase(); return u.role === 'student' && u.level === groupForm.level && u.room === groupForm.room && !groupForm.members.some(mid => String(mid) === String(u.id)) && (`${u.id} ${u.fname} ${u.lname}`.toLowerCase().includes(q)); }).length === 0 && (
                    <p className="px-4 py-3 text-sm text-gray-500 text-center">ไม่พบรายชื่อนักศึกษา</p>
                 )}
               </div>
@@ -810,9 +823,9 @@ export default function App() {
     const publicGroups = await getDocsArray('publicProjects');
     const teacherStubs = [];
     publicGroups.forEach(g => {
-      if (g.teacherId && !teacherStubs.some(t => t.id === g.teacherId)) {
+      if (g.teacherId && !teacherStubs.some(t => String(t.id) === String(g.teacherId))) {
         const parts = String(g.teacherName || '').split(' ');
-        teacherStubs.push({ id: g.teacherId, role: 'teacher', title: '', fname: parts[0] || 'อาจารย์ผู้ควบคุม', lname: parts.slice(1).join(' ') || '' });
+        teacherStubs.push({ id: String(g.teacherId), role: 'teacher', title: '', fname: parts[0] || 'อาจารย์ผู้ควบคุม', lname: parts.slice(1).join(' ') || '' });
       }
     });
     setDb(prev => ({
@@ -858,7 +871,7 @@ export default function App() {
       const [usersRaw, groupsRaw, templatesRaw, submissionsRaw, catSnap] = await Promise.all([
         getDocsArray('users'), getDocsArray('groups'), getDocsArray('templates'), getDocsArray('submissions'), getDoc(doc(firestore, 'catalogs', 'default'))
       ]);
-      const users = usersRaw.filter(u => u.role !== 'disabled' && u.active !== false).map(u => ({ ...u, uid: u._docId }));
+      const users = usersRaw.filter(u => u.role !== 'disabled' && u.active !== false).map(u => ({ ...u, id: u.id != null ? String(u.id) : u.id, uid: u._docId }));
       setDb({ users, groups: groupsRaw, templates: templatesRaw, submissions: submissionsRaw, catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS } });
       return users.find(u => u.role === 'admin' && (u._docId === firebaseUser.uid || u.uid === firebaseUser.uid)) || null;
     }
@@ -868,21 +881,22 @@ export default function App() {
 
     const ownSnap = await getDoc(doc(firestore, 'users', session.userDocId));
     if (!ownSnap.exists()) return null;
-    const own = { ...ownSnap.data(), _docId: ownSnap.id, uid: ownSnap.id };
+    const ownData = ownSnap.data();
+    const own = { ...ownData, id: ownData.id != null ? String(ownData.id) : ownData.id, _docId: ownSnap.id, uid: ownSnap.id };
     if (own.role !== userRole || own.active === false || String(own.id) !== String(session.id)) return null;
 
     if (userRole === 'teacher') {
       const [usersRaw, groupsRaw, templatesRaw, submissionsRaw, catSnap] = await Promise.all([
         getDocsArray('users'), getDocsArray('groups'), getDocsArray('templates'), getDocsArray('submissions'), getDoc(doc(firestore, 'catalogs', 'default'))
       ]);
-      const users = usersRaw.filter(u => u.role !== 'disabled' && u.active !== false).map(u => ({ ...u, uid: u._docId }));
+      const users = usersRaw.filter(u => u.role !== 'disabled' && u.active !== false).map(u => ({ ...u, id: u.id != null ? String(u.id) : u.id, uid: u._docId }));
       setDb({ users, groups: groupsRaw, templates: templatesRaw, submissions: submissionsRaw, catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS } });
       return users.find(u => u._docId === session.userDocId) || own;
     }
 
     const groupsRaw = await getDocsArray('groups', query(collection(firestore, 'groups'), where('members', 'array-contains', session.id)));
     const submissionsRaw = await getDocsArray('submissions', query(collection(firestore, 'submissions'), where('studentId', '==', session.id)));
-    const teachers = groupsRaw.map(g => ({ id: g.teacherId, role: 'teacher', title: '', fname: g.teacherName || 'อาจารย์ผู้ควบคุม', lname: '' })).filter((v,i,a) => v.id && a.findIndex(x => x.id === v.id) === i);
+    const teachers = groupsRaw.map(g => ({ id: String(g.teacherId ?? ''), role: 'teacher', title: '', fname: g.teacherName || 'อาจารย์ผู้ควบคุม', lname: '' })).filter((v,i,a) => v.id && a.findIndex(x => x.id === v.id) === i);
     const catSnap = await getDoc(doc(firestore, 'catalogs', 'default'));
     setDb({ users: [own, ...teachers], groups: groupsRaw, templates: [], submissions: submissionsRaw, catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS } });
     return own;
@@ -918,18 +932,59 @@ export default function App() {
   const provisionLoginIndex = async () => {
     const snap = await getDocs(collection(firestore, 'users'));
     const existing = snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
-    const candidates = existing.filter(u => ['student','teacher'].includes(u.role) && u.active !== false && u.id);
+    const candidates = existing.filter(u => ['student','teacher'].includes(u.role) && u.active !== false && u.id != null);
+
     for (const u of candidates) {
-      const key = loginDocId(u.role, u.id);
+      const normalizedId = String(u.id);
+      if (u.id !== normalizedId) {
+        await setDoc(doc(firestore, 'users', u._docId), { id: normalizedId, updatedAt: Date.now() }, { merge: true });
+      }
+      const key = loginDocId(u.role, normalizedId);
       await setDoc(doc(firestore, 'loginIndex', key), {
         loginKey: key,
-        id: String(u.id),
+        id: normalizedId,
         role: u.role,
         userDocId: u._docId,
         active: true,
         updatedAt: Date.now()
       });
     }
+
+    // แปลงรหัสอ้างอิงเก่าที่อาจเป็นตัวเลขให้เป็นข้อความ เพื่อให้ Rules เปรียบเทียบได้ตรงกัน
+    const groupsSnap = await getDocs(collection(firestore, 'groups'));
+    for (const gd of groupsSnap.docs) {
+      const g = gd.data();
+      const teacherId = g.teacherId != null ? String(g.teacherId) : '';
+      const members = (g.members || []).map(id => String(id));
+      await setDoc(gd.ref, { teacherId, members, updatedAt: Date.now() }, { merge: true });
+      await setDoc(doc(firestore, 'publicProjects', gd.id), {
+        id: gd.id,
+        name: g.name || '',
+        level: g.level || '',
+        room: g.room || '',
+        members,
+        milestones: g.milestones || [],
+        teacherId,
+        teacherName: g.teacherName || ''
+      }, { merge: true });
+    }
+
+    const templatesSnap = await getDocs(collection(firestore, 'templates'));
+    for (const td of templatesSnap.docs) {
+      const t = td.data();
+      if (t.teacherId != null) {
+        await setDoc(td.ref, { teacherId: String(t.teacherId), updatedAt: Date.now() }, { merge: true });
+      }
+    }
+
+    const submissionsSnap = await getDocs(collection(firestore, 'submissions'));
+    for (const sd of submissionsSnap.docs) {
+      const s = sd.data();
+      if (s.studentId != null) {
+        await setDoc(sd.ref, { studentId: String(s.studentId), updatedAt: Date.now() }, { merge: true });
+      }
+    }
+
     return candidates.length;
   };
 
@@ -966,24 +1021,82 @@ export default function App() {
   };
 
   const syncGroups = async nextGroups => {
-    const prevIds = new Set(db.groups.map(g => g.id));
-    const nextIds = new Set(nextGroups.map(g => g.id));
-    for (const g of nextGroups) {
-      const teacher = db.users.find(u => u.id === g.teacherId);
-      const members = (g.members || []).map(id => db.users.find(u => u.id === id)).filter(Boolean);
-      const enriched = { ...clean(g), teacherUid: teacher?._docId || teacher?.uid || '', teacherName: teacher ? `${teacher.title||''}${teacher.fname||''} ${teacher.lname||''}`.trim() : '', memberUids: members.map(m => m._docId || m.uid).filter(Boolean), updatedAt: Date.now() };
-      await setDoc(doc(firestore, 'groups', g.id), enriched);
-      const pub = { id:g.id, name:g.name, level:g.level, room:g.room, members:g.members||[], milestones:g.milestones||[], teacherId:g.teacherId, teacherName:enriched.teacherName };
-      await setDoc(doc(firestore, 'publicProjects', g.id), pub);
+    const normalizeGroup = g => ({
+      ...clean(g),
+      id: String(g.id),
+      teacherId: g.teacherId != null ? String(g.teacherId) : '',
+      members: (g.members || []).map(id => String(id))
+    });
+    const core = g => {
+      const x = normalizeGroup(g);
+      delete x.teacherUid;
+      delete x.teacherName;
+      delete x.memberUids;
+      delete x.updatedAt;
+      delete x._docId;
+      return x;
+    };
+
+    const prevMap = new Map(db.groups.map(g => [String(g.id), g]));
+    const nextMap = new Map(nextGroups.map(g => [String(g.id), normalizeGroup(g)]));
+
+    for (const [id, g] of nextMap.entries()) {
+      const prev = prevMap.get(id);
+      if (prev && JSON.stringify(core(prev)) === JSON.stringify(core(g))) continue;
+
+      const teacher = db.users.find(u => String(u.id ?? '') === String(g.teacherId ?? ''));
+      const members = (g.members || []).map(idVal => db.users.find(u => String(u.id ?? '') === String(idVal))).filter(Boolean);
+      const enriched = {
+        ...g,
+        teacherUid: teacher?._docId || teacher?.uid || '',
+        teacherName: teacher ? `${teacher.title||''}${teacher.fname||''} ${teacher.lname||''}`.trim() : '',
+        memberUids: members.map(m => m._docId || m.uid).filter(Boolean),
+        updatedAt: Date.now()
+      };
+
+      await setDoc(doc(firestore, 'groups', id), enriched);
+      await setDoc(doc(firestore, 'publicProjects', id), {
+        id,
+        name: g.name || '',
+        level: g.level || '',
+        room: g.room || '',
+        members: g.members || [],
+        milestones: g.milestones || [],
+        teacherId: g.teacherId,
+        teacherName: enriched.teacherName
+      });
     }
-    for (const id of prevIds) if (!nextIds.has(id)) { await deleteDoc(doc(firestore, 'groups', id)); await deleteDoc(doc(firestore, 'publicProjects', id)); }
+
+    for (const [id] of prevMap.entries()) {
+      if (!nextMap.has(id)) {
+        await deleteDoc(doc(firestore, 'groups', id));
+        await deleteDoc(doc(firestore, 'publicProjects', id));
+      }
+    }
   };
 
   const syncSimpleCollection = async (name, prev, next) => {
-    const prevIds = new Set((prev || []).map(x => x.id));
-    const nextIds = new Set((next || []).map(x => x.id));
-    for (const item of next || []) await setDoc(doc(firestore, name, item.id), { ...clean(item), updatedAt: Date.now() });
-    for (const id of prevIds) if (!nextIds.has(id)) await deleteDoc(doc(firestore, name, id));
+    const cleanCore = item => {
+      const x = clean(item);
+      delete x.updatedAt;
+      delete x._docId;
+      if (x.teacherId != null) x.teacherId = String(x.teacherId);
+      if (x.studentId != null) x.studentId = String(x.studentId);
+      return x;
+    };
+
+    const prevMap = new Map((prev || []).map(item => [String(item.id), item]));
+    const nextMap = new Map((next || []).map(item => [String(item.id), cleanCore(item)]));
+
+    for (const [id, item] of nextMap.entries()) {
+      const before = prevMap.get(id);
+      if (before && JSON.stringify(cleanCore(before)) === JSON.stringify(item)) continue;
+      await setDoc(doc(firestore, name, id), { ...item, updatedAt: Date.now() });
+    }
+
+    for (const [id] of prevMap.entries()) {
+      if (!nextMap.has(id)) await deleteDoc(doc(firestore, name, id));
+    }
   };
 
   const handleUpdate = async (collectionKey, newData) => {
