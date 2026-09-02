@@ -953,17 +953,31 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
               ))}
             </div>
             <input 
-              type="text" placeholder="พิมพ์ชื่อเพื่อค้นหา..." value={searchStudent} onChange={e => setSearchStudent(e.target.value)}
+              type="text" placeholder="ค้นหาด้วยรหัส ชื่อ หรือนามสกุล..." value={searchStudent} onChange={e => setSearchStudent(e.target.value)}
               className="w-full border border-gray-200 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
             />
             {searchStudent && (
               <div className="mt-1 border border-gray-200 rounded-lg shadow-sm max-h-40 overflow-y-auto bg-white">
-                {db.users.filter(u => { const q=searchStudent.toLowerCase(); return u.role === 'student' && u.level === groupForm.level && u.room === groupForm.room && !groupForm.members.some(mid => String(mid) === String(u.id)) && (`${u.id} ${u.fname} ${u.lname}`.toLowerCase().includes(q)); }).map(student => (
+                {db.users.filter(u => {
+                  const normalize = (value) => String(value ?? '').normalize('NFC').toLowerCase().replace(/[\s.\-_\/]+/g, '');
+                  const q = normalize(searchStudent);
+                  const sameLevel = normalize(u.level) === normalize(groupForm.level);
+                  const sameRoom = normalize(u.room) === normalize(groupForm.room);
+                  const haystack = normalize(`${u.id} ${u.title || ''} ${u.fname || ''} ${u.lname || ''}`);
+                  return u.role === 'student' && sameLevel && sameRoom && !groupForm.members.some(mid => String(mid) === String(u.id)) && haystack.includes(q);
+                }).map(student => (
                   <div key={student.id} onClick={() => { if(groupForm.members.length>=6) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 6 คน','error'); setGroupForm(p => ({...p, members: [...p.members, String(student.id)]})); setSearchStudent(''); }} className="px-4 py-2 hover:bg-gray-50 cursor-pointer text-sm">
                     {student.fname} {student.lname} ({student.id})
                   </div>
                 ))}
-                {db.users.filter(u => { const q=searchStudent.toLowerCase(); return u.role === 'student' && u.level === groupForm.level && u.room === groupForm.room && !groupForm.members.some(mid => String(mid) === String(u.id)) && (`${u.id} ${u.fname} ${u.lname}`.toLowerCase().includes(q)); }).length === 0 && (
+                {db.users.filter(u => {
+                  const normalize = (value) => String(value ?? '').normalize('NFC').toLowerCase().replace(/[\s.\-_\/]+/g, '');
+                  const q = normalize(searchStudent);
+                  const sameLevel = normalize(u.level) === normalize(groupForm.level);
+                  const sameRoom = normalize(u.room) === normalize(groupForm.room);
+                  const haystack = normalize(`${u.id} ${u.title || ''} ${u.fname || ''} ${u.lname || ''}`);
+                  return u.role === 'student' && sameLevel && sameRoom && !groupForm.members.some(mid => String(mid) === String(u.id)) && haystack.includes(q);
+                }).length === 0 && (
                    <p className="px-4 py-3 text-sm text-gray-500 text-center">ไม่พบรายชื่อนักศึกษา</p>
                 )}
               </div>
@@ -1583,7 +1597,7 @@ export default function App() {
                 <h2 className="text-center font-medium text-gray-500 mb-6">เลือกสถานะเพื่อเข้าใช้งาน</h2>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('student')}><UserCircle className="text-blue-500"/> นักศึกษา (Student)</Button>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('teacher')}><CheckCircle className="text-green-500"/> อาจารย์ผู้ควบคุม (Teacher)</Button>
-                <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('parent')}><Search className="text-amber-500"/> ผู้ปกครอง (Parent)</Button>
+                <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('parent')}><Search className="text-amber-500"/> ผู้เข้าชม (Parent)</Button>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('admin')}><Settings className="text-gray-500"/> ผู้จัดการระบบ (Admin)</Button>
               </div>
             ) : (
