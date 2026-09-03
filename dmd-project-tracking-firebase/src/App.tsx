@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { signInAnonymously, signOut } from 'firebase/auth';
-import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from 'firebase/firestore';
-import { auth, db as firestore } from './firebase';
+import { collection, doc, getDoc, getDocs, onSnapshot, setDoc, writeBatch } from 'firebase/firestore';
+import { auth, authReady, db as firestore } from './firebase';
 import { 
   Users, UserCircle, LogOut, Search, Plus, Trash2, Edit2, 
   CheckCircle, Clock, Link as LinkIcon, BarChart3, Settings, 
@@ -12,6 +12,10 @@ import {
 const DEFAULT_LEVELS = ['ปวช. 1', 'ปวช. 2', 'ปวช. 3', 'ปวส. 1', 'ปวส. 2'];
 const DEFAULT_ROOMS = ['1', '2', '3', '4'];
 const ADMIN_PASSWORD = '995622';
+const APP_VERSION = '8.0.0';
+const DB_SCHEMA_VERSION = 8;
+const ACTIVE_COLLECTIONS = ['users', 'groups', 'templates', 'submissions'];
+const LEGACY_COLLECTIONS = ['loginIndex', 'authProfiles', 'sessions', 'publicStudents', 'publicProjects', 'publicStats', 'auditLogs'];
 
 // --- UTILITIES ---
 const getProgressColor = (percent) => {
@@ -49,6 +53,13 @@ const makeEntityId = (prefix) => {
   const bytes = new Uint8Array(12);
   window.crypto.getRandomValues(bytes);
   return `${prefix}_${Date.now()}_${Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')}`;
+};
+
+const normalizeMatchText = (value) => String(value ?? '').normalize('NFC').toLowerCase().replace(/[\s.\-_\/]+/g, '');
+const canonicalFromList = (value, options = [], fallback = '') => {
+  const raw = String(value ?? '').trim();
+  const found = (options || []).find(opt => normalizeMatchText(opt) === normalizeMatchText(raw));
+  return found || raw || fallback;
 };
 
 const toDateInputValue = (date = new Date()) => {
@@ -210,7 +221,7 @@ const ProgressBar = ({ percent }) => {
   );
 };
 
-const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, currentUser }) => {
+const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, currentUser, systemHealth, inspectSystem, cleanupSystem, exportBackup, deleteAllStudentsRemote }) => {
   const LEVELS = db.catalogs?.levels?.length ? db.catalogs.levels : DEFAULT_LEVELS;
   const ROOMS = db.catalogs?.rooms?.length ? db.catalogs.rooms : DEFAULT_ROOMS;
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -218,6 +229,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
   const [editingUser, setEditingUser] = useState(null);
   const [formData, setFormData] = useState({ id: '', title: '', fname: '', lname: '', level: LEVELS[0], room: ROOMS[0] });
   const [setupCodeDialog, setSetupCodeDialog] = useState({ isOpen: false, code: '123456', teacher: null, teacherName: '' });
+  const [systemBusy, setSystemBusy] = useState(false);
   const fileInputRef = useRef(null);
 
   const isUserTab = activeTab === 'students' || activeTab === 'teachers';
@@ -250,7 +262,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
     if (isEdit) {
       newUsers = newUsers.map(u => u.id === editingUser.id ? { ...u, ...safeFormData, role: roleName } : u);
     } else {
-      if (newUsers.find(u => u.id === safeFormData.id)) return showToast('รหัสนี้มีในระบบแล้ว', 'error');
+      if (newUsers.find(u => u.role === roleName && String(u.id) === String(safeFormData.id))) return showToast('รหัสนี้มีในระบบแล้วสำหรับบทบาทนี้', 'error');
       newUsers.push({ ...safeFormData, ...teacherPasswordPatch, role: roleName });
     }
     const ok = await handleUpdate('users', newUsers);
@@ -260,9 +272,10 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
   };
 
   const handleDelete = (id) => {
-    askConfirm('ต้องการลบผู้ใช้งานนี้ใช่หรือไม่?', () => {
-      handleUpdate('users', db.users.filter(u => u.id !== id));
-      showToast('ลบข้อมูลสำเร็จ');
+    const roleName = activeTab === 'students' ? 'student' : 'teacher';
+    askConfirm('ต้องการลบผู้ใช้งานนี้ใช่หรือไม่?', async () => {
+      const ok = await handleUpdate('users', db.users.filter(u => !(u.role === roleName && String(u.id) === String(id))));
+      if (ok) showToast('ลบข้อมูลสำเร็จ');
     });
   };
 
@@ -354,8 +367,8 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
             lname: String(cols[3] || '').trim()
           };
           if (roleName === 'student') {
-            user.level = String(cols[4] || LEVELS[0]).trim();
-            user.room = String(cols[5] || ROOMS[0]).trim();
+            user.level = canonicalFromList(cols[4] || LEVELS[0], LEVELS, LEVELS[0]);
+            user.room = canonicalFromList(cols[5] || ROOMS[0], ROOMS, ROOMS[0]);
           }
           const key = `${roleName}:${id.toLowerCase()}`;
           if (importedMap.has(key)) duplicateRows++;
@@ -409,50 +422,63 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
   };
 
   const handleDeleteAllStudents = () => {
-    const studentIds = new Set(db.users.filter(u => u.role === 'student').map(u => String(u.id)));
-    const total = studentIds.size;
+    const total = db.users.filter(u => u.role === 'student').length;
     if (!total) return showToast('ยังไม่มีข้อมูลนักศึกษาให้ลบ', 'error');
 
     askConfirm(`ต้องการลบนักศึกษาทั้งหมด ${total} คนหรือไม่? ระบบจะลบข้อมูลนักศึกษา ลิงก์ที่นักศึกษาส่ง และนำรายชื่อนักศึกษาออกจากทุกกลุ่ม การดำเนินการนี้ย้อนกลับไม่ได้`, async () => {
       try {
-        const nextUsers = db.users.filter(u => u.role !== 'student');
-        const nextSubmissions = (db.submissions || []).filter(s => !studentIds.has(String(s.studentId)));
-        const nextGroups = (db.groups || []).map(g => ({
-          ...g,
-          members: (g.members || []).filter(id => !studentIds.has(String(id)))
-        }));
-
-        const usersOk = await handleUpdate('users', nextUsers);
-        if (!usersOk) return;
-        const submissionsOk = await handleUpdate('submissions', nextSubmissions);
-        if (!submissionsOk) return;
-        const groupsOk = await handleUpdate('groups', nextGroups);
-        if (!groupsOk) return;
-        showToast(`ลบนักศึกษาทั้งหมด ${total} คนเรียบร้อยแล้ว`);
+        setSystemBusy(true);
+        const result = await deleteAllStudentsRemote();
+        showToast(`ลบนักศึกษาทั้งหมดแล้ว ${result.students} คน • ลบลิงก์ ${result.submissions} รายการ • ปรับกลุ่ม ${result.groups} กลุ่ม`);
       } catch (err) {
         console.error('delete all students', err);
         showToast(`ลบนักศึกษาทั้งหมดไม่สำเร็จ: ${err?.message || err}`, 'error');
+      } finally {
+        setSystemBusy(false);
       }
     });
   };
 
+  const handleInspectSystem = async () => {
+    try {
+      setSystemBusy(true);
+      const result = await inspectSystem();
+      showToast(`ตรวจสอบฐานข้อมูลแล้ว • ผู้ใช้ซ้ำ ${result.duplicateUserDocs} เอกสาร • ข้อมูลระบบเก่า ${result.legacyDocs} เอกสาร`);
+    } catch (err) {
+      showToast(`ตรวจสอบไม่สำเร็จ: ${err?.message || err}`, 'error');
+    } finally { setSystemBusy(false); }
+  };
+
+  const handleCleanupSystem = () => {
+    askConfirm('ทำความสะอาดฐานข้อมูลสำหรับระบบ v8 หรือไม่? ระบบจะรวมรหัสผู้ใช้ที่ซ้ำ จัดรูปแบบข้อมูลหลัก และลบ collection ของระบบเวอร์ชันเก่า แนะนำให้กด “สำรองข้อมูล JSON” ก่อนดำเนินการ', async () => {
+      try {
+        setSystemBusy(true);
+        const result = await cleanupSystem();
+        showToast(`ทำความสะอาดสำเร็จ • รวมผู้ใช้ ${result.canonicalUsers} คน • ลบข้อมูลซ้ำ/เก่า ${result.deletedDocs} เอกสาร`);
+      } catch (err) {
+        console.error('cleanup system', err);
+        showToast(`ทำความสะอาดไม่สำเร็จ: ${err?.message || err}`, 'error');
+      } finally { setSystemBusy(false); }
+    });
+  };
+
   const updateCatalog = (key, next) => handleUpdate('catalogs', { ...(db.catalogs || {}), [key]: next });
-  const addCatalog = (key, label) => askPrompt(`เพิ่ม${label}`, value => {
+  const addCatalog = (key, label) => askPrompt(`เพิ่ม${label}`, async value => {
     const v = String(value || '').trim();
     if (!v) return;
     const arr = key === 'levels' ? LEVELS : ROOMS;
     if (arr.includes(v)) return showToast(`${label}นี้มีอยู่แล้ว`, 'error');
-    updateCatalog(key, [...arr, v]);
-    showToast(`เพิ่ม${label}แล้ว`);
+    const ok = await updateCatalog(key, [...arr, v]);
+    if (ok) showToast(`เพิ่ม${label}แล้ว`);
   });
   const removeCatalog = (key, value, label) => {
-    const inUse = db.users.some(u => u.role === 'student' && (key === 'levels' ? u.level === value : u.room === value)) ||
-      db.groups.some(g => key === 'levels' ? g.level === value : g.room === value);
+    const inUse = db.users.some(u => u.role === 'student' && (key === 'levels' ? normalizeMatchText(u.level) === normalizeMatchText(value) : normalizeMatchText(u.room) === normalizeMatchText(value))) ||
+      db.groups.some(g => key === 'levels' ? normalizeMatchText(g.level) === normalizeMatchText(value) : normalizeMatchText(g.room) === normalizeMatchText(value));
     if (inUse) return showToast(`ลบไม่ได้ เพราะ${label}นี้ถูกใช้งานอยู่`, 'error');
-    askConfirm(`ลบ${label} “${value}” หรือไม่?`, () => {
+    askConfirm(`ลบ${label} “${value}” หรือไม่?`, async () => {
       const arr = key === 'levels' ? LEVELS : ROOMS;
-      updateCatalog(key, arr.filter(v => v !== value));
-      showToast(`ลบ${label}แล้ว`);
+      const ok = await updateCatalog(key, arr.filter(v => v !== value));
+      if (ok) showToast(`ลบ${label}แล้ว`);
     });
   };
 
@@ -461,8 +487,8 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
   const approvedWeight = db.groups.reduce((sum, g) => sum + calculateGroupProgress(g.milestones || []), 0);
   const avgProgress = db.groups.length ? approvedWeight / db.groups.length : 0;
   const levelStats = LEVELS.map(level => {
-    const groups = db.groups.filter(g => g.level === level);
-    return { level, groups: groups.length, students: students.filter(s => s.level === level).length, progress: groups.length ? groups.reduce((a,g)=>a+calculateGroupProgress(g.milestones||[]),0)/groups.length : 0 };
+    const groups = db.groups.filter(g => normalizeMatchText(g.level) === normalizeMatchText(level));
+    return { level, groups: groups.length, students: students.filter(s => normalizeMatchText(s.level) === normalizeMatchText(level)).length, progress: groups.length ? groups.reduce((a,g)=>a+calculateGroupProgress(g.milestones||[]),0)/groups.length : 0 };
   });
 
   const tabs = [
@@ -470,7 +496,8 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
     ['students', <GraduationCap size={16}/>, 'นักศึกษา'],
     ['teachers', <School size={16}/>, 'อาจารย์ผู้ควบคุม'],
     ['catalogs', <Settings size={16}/>, 'คลังระดับชั้น/ห้อง'],
-    ['projects', <FolderKanban size={16}/>, 'จัดการโครงงาน']
+    ['projects', <FolderKanban size={16}/>, 'จัดการโครงงาน'],
+    ['system', <ShieldCheck size={16}/>, 'ระบบ/ฐานข้อมูล']
   ];
 
   return (
@@ -511,6 +538,40 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
       </div>}
 
       {activeTab === 'projects' && <TeacherView user={currentUser} db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt} adminMode />}
+
+      {activeTab === 'system' && <div className="space-y-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <Card><p className="text-xs text-gray-500">เวอร์ชันระบบ</p><p className="text-2xl font-bold mt-2">v{APP_VERSION}</p></Card>
+          <Card><p className="text-xs text-gray-500">นักศึกษาในระบบ</p><p className="text-2xl font-bold mt-2">{db.users.filter(u=>u.role==='student').length}</p></Card>
+          <Card><p className="text-xs text-gray-500">อาจารย์ในระบบ</p><p className="text-2xl font-bold mt-2">{db.users.filter(u=>u.role==='teacher').length}</p></Card>
+          <Card><p className="text-xs text-gray-500">กลุ่มโครงงาน</p><p className="text-2xl font-bold mt-2">{db.groups.length}</p></Card>
+        </div>
+
+        <Card>
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+            <div>
+              <h3 className="font-bold text-gray-800 text-lg">ตรวจสุขภาพฐานข้อมูล</h3>
+              <p className="text-sm text-gray-500 mt-1">ใช้ตรวจรหัสซ้ำ เอกสารจากระบบรุ่นเก่า และความสัมพันธ์ข้อมูลก่อนใช้งานจริง</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" disabled={systemBusy} onClick={handleInspectSystem}><Info size={16}/> ตรวจสอบ</Button>
+              <Button variant="secondary" disabled={systemBusy} onClick={exportBackup}><Download size={16}/> สำรองข้อมูล JSON</Button>
+              <Button disabled={systemBusy} onClick={handleCleanupSystem}><ShieldCheck size={16}/> ทำความสะอาดระบบ v8</Button>
+            </div>
+          </div>
+
+          {systemHealth ? <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-5">
+            <div className="p-4 rounded-xl bg-gray-50 border"><p className="text-xs text-gray-500">เอกสารผู้ใช้จริง</p><p className="text-xl font-bold mt-1">{systemHealth.rawUserDocs}</p></div>
+            <div className={`p-4 rounded-xl border ${systemHealth.duplicateUserDocs ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'}`}><p className="text-xs text-gray-500">เอกสารผู้ใช้ซ้ำ</p><p className="text-xl font-bold mt-1">{systemHealth.duplicateUserDocs}</p></div>
+            <div className={`p-4 rounded-xl border ${systemHealth.legacyDocs ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'}`}><p className="text-xs text-gray-500">ข้อมูลระบบเก่า</p><p className="text-xl font-bold mt-1">{systemHealth.legacyDocs}</p></div>
+            <div className={`p-4 rounded-xl border ${systemHealth.orphanRefs ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'}`}><p className="text-xs text-gray-500">การอ้างอิงที่หาเจ้าของไม่พบ</p><p className="text-xl font-bold mt-1">{systemHealth.orphanRefs}</p></div>
+          </div> : <div className="mt-5 p-4 bg-blue-50 border border-blue-100 rounded-xl text-sm text-blue-800">กด “ตรวจสอบ” เพื่อดูสถานะฐานข้อมูลปัจจุบัน ก่อนทำความสะอาดระบบครั้งแรก</div>}
+
+          <div className="mt-5 p-4 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800">
+            <b>ใช้ครั้งเดียวก่อนเปิดใช้งานจริง:</b> กดสำรองข้อมูล JSON → ตรวจสอบ → ทำความสะอาดระบบ v8 หลังจากนั้นไม่ต้องทำซ้ำทุกครั้งที่ Login
+          </div>
+        </Card>
+      </div>}
 
       <Modal isOpen={isModalOpen} onClose={()=>setIsModalOpen(false)} title={editingUser?'แก้ไขข้อมูล':'เพิ่มข้อมูลใหม่'}>
         <div className="space-y-4">
@@ -759,7 +820,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     const tpl = allTemplates.find(t => t.id === templateId);
     if (!tpl) return;
     
-    const applyTpl = () => {
+    const applyTpl = async () => {
       const appliedMilestones = tpl.milestones.map((m, idx) => ({
         id: `${makeEntityId('m')}_${idx}`,
         order: idx + 1,
@@ -769,7 +830,8 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
         assignDate: toDateInputValue(),
         dueDate: ''
       }));
-      updateMilestones(appliedMilestones);
+      const ok = await updateMilestones(appliedMilestones);
+      if (!ok) return;
       setIsTemplateModalOpen(false);
       showToast('โหลดเทมเพลตสำเร็จ');
     };
@@ -785,7 +847,9 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     const source = (db.groups || []).find(g => String(g.id) === String(sourceGroupId));
     if (!source) return showToast('ไม่พบกลุ่มต้นแบบที่เลือก', 'error');
 
-    const copiedMembers = (source.members || []).map(id => String(id));
+    const validStudentIds = new Set(db.users.filter(u=>u.role==='student').map(u=>String(u.id)));
+    const sourceMembers = (source.members || []).map(id => String(id));
+    const copiedMembers = sourceMembers.filter(id => validStudentIds.has(id));
     setGroupForm({
       id: '',
       name: source.name || '',
@@ -799,7 +863,8 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     setSearchStudent('');
     setIsGroupTemplateModalOpen(false);
     setIsGroupModalOpen(true);
-    showToast('คัดลอกกลุ่มต้นแบบแล้ว กรุณาตรวจสอบชื่อกลุ่มและสมาชิกก่อนบันทึก');
+    const skipped = sourceMembers.length - copiedMembers.length;
+    showToast(skipped ? `คัดลอกกลุ่มแล้ว • ข้ามสมาชิกที่ไม่มีในฐานข้อมูล ${skipped} คน` : 'คัดลอกกลุ่มต้นแบบแล้ว กรุณาตรวจสอบชื่อกลุ่มและสมาชิกก่อนบันทึก');
   };
 
   const changeTeacherPassword = async () => {
@@ -1156,7 +1221,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
 };
 
 const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, showToast, askPrompt }) => {
-  const myProjects = db.groups.filter(g => g.members.includes(targetStudent?.id));
+  const myProjects = db.groups.filter(g => (g.members || []).some(id => String(id) === String(targetStudent?.id || '')));
   
   if (!targetStudent) return null;
 
@@ -1167,34 +1232,33 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
   };
 
   const getTeacherName = (tId) => {
-    const t = db.users.find(u => u.id === tId);
+    const t = db.users.find(u => u.role === 'teacher' && String(u.id) === String(tId));
     return t ? `${t.title}${t.fname} ${t.lname}` : 'ไม่ระบุ';
   };
 
   const submitLink = (groupId) => {
-    askPrompt('กรุณาวาง URL/Link งานที่ต้องการส่ง', (url) => {
+    askPrompt('กรุณาวาง URL/Link งานที่ต้องการส่ง', async (url) => {
       if(!url) return;
       if(!url.startsWith('http')) return showToast('รูปแบบ Link ไม่ถูกต้อง (ต้องขึ้นต้นด้วย http)', 'error');
       const submission = {
         id: makeEntityId('sub'),
         groupId,
-        studentUid: targetStudent.uid,
-        studentId: targetStudent.id,
+        studentId: String(targetStudent.id),
         url,
         createdAt: Date.now()
       };
-      handleUpdate('submissions', [...(db.submissions || []), submission]);
-      showToast('ส่งลิงก์งานเรียบร้อยแล้ว');
+      const ok = await handleUpdate('submissions', [...(db.submissions || []), submission]);
+      if (ok) showToast('ส่งลิงก์งานเรียบร้อยแล้ว');
     });
   }
 
   const overallProgress = calculateTotalOverallProgress();
   const hasAnyRejection = myProjects.some(p => hasRejectedMilestone(p.milestones));
-  const sameLevelGroups = db.groups.filter(g => g.level === targetStudent.level);
+  const sameLevelGroups = db.groups.filter(g => normalizeMatchText(g.level) === normalizeMatchText(targetStudent.level));
   const sameLevelRooms = [...new Set(sameLevelGroups.map(g => g.room))].sort();
   const allLevels = db.catalogs?.levels?.length ? db.catalogs.levels : DEFAULT_LEVELS;
   const parentLevelSummary = allLevels.map(level => {
-    const gs = db.groups.filter(g => g.level === level);
+    const gs = db.groups.filter(g => normalizeMatchText(g.level) === normalizeMatchText(level));
     return { level, count: gs.length, progress: gs.length ? gs.reduce((sum,g)=>sum+calculateGroupProgress(g.milestones||[]),0)/gs.length : 0 };
   });
 
@@ -1224,7 +1288,7 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
           <h3 className="font-bold text-gray-800 mb-1">ภาพรวมระดับชั้น {targetStudent.level}</h3>
           <p className="text-xs text-gray-500 mb-4">เห็นเฉพาะกลุ่มในระดับชั้นเดียวกัน โดยรวมทุกห้องของเพื่อนร่วมระดับ</p>
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            {sameLevelRooms.map(room => { const gs=sameLevelGroups.filter(g=>g.room===room); const p=gs.length?gs.reduce((a,g)=>a+calculateGroupProgress(g.milestones||[]),0)/gs.length:0; return <div key={room} className="p-3 rounded-xl bg-gray-50 border border-gray-100"><p className="text-sm font-bold mb-2">ห้อง {room} <span className="text-xs font-normal text-gray-400">({gs.length} กลุ่ม)</span></p><ProgressBar percent={p}/></div> })}
+            {sameLevelRooms.map(room => { const gs=sameLevelGroups.filter(g=>normalizeMatchText(g.room)===normalizeMatchText(room)); const p=gs.length?gs.reduce((a,g)=>a+calculateGroupProgress(g.milestones||[]),0)/gs.length:0; return <div key={room} className="p-3 rounded-xl bg-gray-50 border border-gray-100"><p className="text-sm font-bold mb-2">ห้อง {room} <span className="text-xs font-normal text-gray-400">({gs.length} กลุ่ม)</span></p><ProgressBar percent={p}/></div> })}
             {!sameLevelRooms.length && <p className="text-sm text-gray-400">ยังไม่มีข้อมูลภาพรวมระดับชั้น</p>}
           </div>
         </Card>
@@ -1394,6 +1458,10 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState({ isOpen: false, msg: '', onConfirm: null });
   const [promptDialog, setPromptDialog] = useState({ isOpen: false, title: '', onSubmit: null, value: '' });
+  const [systemHealth, setSystemHealth] = useState(null);
+  const writeQueueRef = useRef(Promise.resolve());
+  const realtimeUnsubsRef = useRef([]);
+  const dbRef = useRef(db);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
@@ -1406,7 +1474,78 @@ export default function App() {
   const safeDocId = value => String(value || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_') || `id_${Date.now()}`;
   const normalizeUserId = value => String(value ?? '').trim();
   const logicalUserKey = user => `${String(user?.role || '').trim().toLowerCase()}:${normalizeUserId(user?.id).toLowerCase()}`;
-  const canonicalUserDocId = user => `${String(user?.role || '').trim().toLowerCase()}_${safeDocId(normalizeUserId(user?.id))}`;
+  const canonicalUserDocId = user => String(user?.role || '').trim().toLowerCase() === 'admin'
+    ? 'admin_default'
+    : `${String(user?.role || '').trim().toLowerCase()}_${safeDocId(normalizeUserId(user?.id))}`;
+
+  const toMillis = value => {
+    if (!value) return 0;
+    if (typeof value === 'number') return value;
+    if (typeof value?.toMillis === 'function') return value.toMillis();
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const normalizeUsersData = usersRaw => {
+    const levelOptions = dbRef.current?.catalogs?.levels?.length ? dbRef.current.catalogs.levels : DEFAULT_LEVELS;
+    const roomOptions = dbRef.current?.catalogs?.rooms?.length ? dbRef.current.catalogs.rooms : DEFAULT_ROOMS;
+    const normalized = (usersRaw || [])
+      .filter(u => u.role !== 'disabled' && u.active !== false)
+      .map(u => {
+        const base = { ...u, id: normalizeUserId(u.id), uid: u._docId || u.uid };
+        return u.role === 'student' ? { ...base, level:canonicalFromList(u.level, levelOptions, String(u.level || '')), room:canonicalFromList(u.room, roomOptions, String(u.room || '')) } : base;
+      })
+      .filter(u => u.id && u.role)
+      .sort((a, b) => toMillis(a.updatedAt || a.createdAt) - toMillis(b.updatedAt || b.createdAt));
+    const byKey = new Map();
+    for (const u of normalized) {
+      const key = logicalUserKey(u);
+      const before = byKey.get(key);
+      byKey.set(key, before ? { ...before, ...u, id: normalizeUserId(u.id), uid: u._docId || u.uid, _docId: u._docId || u.uid } : u);
+    }
+    return [...byKey.values()];
+  };
+
+  const normalizeGroupsData = groupsRaw => {
+    const levelOptions = dbRef.current?.catalogs?.levels?.length ? dbRef.current.catalogs.levels : DEFAULT_LEVELS;
+    const roomOptions = dbRef.current?.catalogs?.rooms?.length ? dbRef.current.catalogs.rooms : DEFAULT_ROOMS;
+    return (groupsRaw || []).map(g => ({
+      ...g,
+      id: String(g.id ?? g._docId),
+      teacherId: g.teacherId != null ? String(g.teacherId).trim() : '',
+      level:canonicalFromList(g.level, levelOptions, String(g.level || '')),
+      room:canonicalFromList(g.room, roomOptions, String(g.room || '')),
+      members: Array.from(new Set((g.members || []).map(id => String(id).trim()).filter(Boolean))),
+      milestones: Array.isArray(g.milestones) ? g.milestones : []
+    }));
+  };
+
+  const normalizeTemplatesData = rows => (rows || []).map(t => ({
+    ...t,
+    id: String(t.id ?? t._docId),
+    teacherId: t.teacherId != null ? String(t.teacherId).trim() : '',
+    milestones: Array.isArray(t.milestones) ? t.milestones : []
+  }));
+
+  const normalizeSubmissionsData = rows => (rows || []).map(s => ({
+    ...s,
+    id: String(s.id ?? s._docId),
+    groupId: s.groupId != null ? String(s.groupId).trim() : '',
+    studentId: s.studentId != null ? String(s.studentId).trim() : ''
+  }));
+
+  const commitOperations = async operations => {
+    const ops = (operations || []).filter(Boolean);
+    for (let i = 0; i < ops.length; i += 400) {
+      const batch = writeBatch(firestore);
+      for (const op of ops.slice(i, i + 400)) {
+        if (op.type === 'delete') batch.delete(op.ref);
+        else if (op.type === 'update') batch.update(op.ref, op.data);
+        else batch.set(op.ref, op.data, op.options || {});
+      }
+      await batch.commit();
+    }
+  };
 
   const getDocsArray = async name => {
     const snap = await getDocs(collection(firestore, name));
@@ -1414,6 +1553,8 @@ export default function App() {
   };
 
   const ensureAnonymousSession = async () => {
+    await authReady;
+    if (typeof auth.authStateReady === 'function') await auth.authStateReady();
     if (auth.currentUser?.isAnonymous) return auth.currentUser;
     if (auth.currentUser) {
       try { await signOut(auth); } catch (_) {}
@@ -1447,8 +1588,15 @@ export default function App() {
     }
 
     if (!catSnap.exists()) {
-      await setDoc(doc(firestore, 'catalogs', 'default'), { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS });
+      await setDoc(doc(firestore, 'catalogs', 'default'), { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS, schemaVersion: DB_SCHEMA_VERSION });
     }
+
+    await setDoc(doc(firestore, 'system', 'app'), {
+      appVersion: APP_VERSION,
+      schemaVersion: DB_SCHEMA_VERSION,
+      activeCollections: [...ACTIVE_COLLECTIONS, 'catalogs', 'system'],
+      updatedAt: Date.now()
+    }, { merge: true });
   };
 
   const loadAllData = async () => {
@@ -1460,36 +1608,43 @@ export default function App() {
       getDoc(doc(firestore, 'catalogs', 'default'))
     ]);
 
-    // Firestore อาจมีเอกสารเก่าซ้ำจากเวอร์ชันก่อนหน้า แม้จะเป็นรหัสคนเดียวกัน
-    // จึงรวมตาม role + id ก่อนแสดงผล เพื่อให้ยอดนักศึกษา/อาจารย์ตรงกับคนจริง
-    const normalizedUsersRaw = usersRaw
-      .filter(u => u.role !== 'disabled' && u.active !== false)
-      .map(u => ({ ...u, id: normalizeUserId(u.id), uid: u._docId }))
-      .filter(u => u.id && u.role)
-      .sort((a, b) => Number(a.updatedAt || a.createdAt || 0) - Number(b.updatedAt || b.createdAt || 0));
-
-    const usersByKey = new Map();
-    for (const u of normalizedUsersRaw) {
-      const key = logicalUserKey(u);
-      const before = usersByKey.get(key);
-      usersByKey.set(key, before ? { ...before, ...u, id: normalizeUserId(u.id), uid: u._docId, _docId: u._docId } : u);
-    }
-    const users = [...usersByKey.values()];
-
-    const groups = groupsRaw.map(g => ({
-      ...g,
-      id: String(g.id ?? g._docId),
-      teacherId: g.teacherId != null ? String(g.teacherId).trim() : '',
-      members: (g.members || []).map(id => String(id).trim())
-    }));
-
-    const templates = templatesRaw.map(t => ({ ...t, teacherId: t.teacherId != null ? String(t.teacherId).trim() : t.teacherId }));
-    const submissions = submissionsRaw.map(s => ({ ...s, studentId: s.studentId != null ? String(s.studentId).trim() : s.studentId }));
-    const catalogs = catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS };
-
-    const nextDb = { users, groups, templates, submissions, catalogs };
+    const nextDb = {
+      users: normalizeUsersData(usersRaw),
+      groups: normalizeGroupsData(groupsRaw),
+      templates: normalizeTemplatesData(templatesRaw),
+      submissions: normalizeSubmissionsData(submissionsRaw),
+      catalogs: catSnap.exists() ? catSnap.data() : { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS, schemaVersion: DB_SCHEMA_VERSION }
+    };
     setDb(nextDb);
     return nextDb;
+  };
+
+  const subscribeRealtime = () => {
+    realtimeUnsubsRef.current.forEach(unsub => { try { unsub(); } catch (_) {} });
+    realtimeUnsubsRef.current = [];
+
+    const onError = err => console.error('realtime sync', err);
+    realtimeUnsubsRef.current.push(
+      onSnapshot(collection(firestore, 'users'), snap => {
+        const rows = snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
+        setDb(prev => ({ ...prev, users: normalizeUsersData(rows) }));
+      }, onError),
+      onSnapshot(collection(firestore, 'groups'), snap => {
+        const rows = snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
+        setDb(prev => ({ ...prev, groups: normalizeGroupsData(rows) }));
+      }, onError),
+      onSnapshot(collection(firestore, 'templates'), snap => {
+        const rows = snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
+        setDb(prev => ({ ...prev, templates: normalizeTemplatesData(rows) }));
+      }, onError),
+      onSnapshot(collection(firestore, 'submissions'), snap => {
+        const rows = snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
+        setDb(prev => ({ ...prev, submissions: normalizeSubmissionsData(rows) }));
+      }, onError),
+      onSnapshot(doc(firestore, 'catalogs', 'default'), snap => {
+        if (snap.exists()) setDb(prev => ({ ...prev, catalogs: snap.data() }));
+      }, onError)
+    );
   };
 
   const restoreWebSession = nextDb => {
@@ -1514,7 +1669,10 @@ export default function App() {
         await ensureAnonymousSession();
         await ensureBaseData();
         const nextDb = await loadAllData();
-        if (!cancelled) restoreWebSession(nextDb);
+        if (!cancelled) {
+          restoreWebSession(nextDb);
+          subscribeRealtime();
+        }
       } catch (err) {
         console.error('init', err);
         if (!cancelled) showToast(`ไม่สามารถเริ่มระบบได้: ${err?.message || err}`, 'error');
@@ -1522,16 +1680,27 @@ export default function App() {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      realtimeUnsubsRef.current.forEach(unsub => { try { unsub(); } catch (_) {} });
+      realtimeUnsubsRef.current = [];
+    };
   }, []);
+
+  useEffect(() => {
+    if (!currentUser || !role) return;
+    const latest = db.users.find(u => u.role === currentUser.role && String(u.id) === String(currentUser.id));
+    if (latest && JSON.stringify(latest) !== JSON.stringify(currentUser)) setCurrentUser(latest);
+  }, [db.users, role]);
+
+  useEffect(() => { dbRef.current = db; }, [db]);
 
   const syncUsers = async (nextUsers, options = {}) => {
     const forceCanonicalize = options.forceCanonicalize === true;
+    const liveDb = dbRef.current;
 
-    // snapshot ก่อนแก้จากหน้าจอ ใช้เพียงเพื่อหาว่า "คนไหนเปลี่ยนจริง"
-    // จะไม่เขียนผู้ใช้ทุกคนทับกันอีกแล้ว เพราะอาจารย์หลายคนใช้งานพร้อมกันได้
     const localMap = new Map();
-    for (const raw of db.users.filter(u => ['student','teacher'].includes(u.role))) {
+    for (const raw of liveDb.users.filter(u => ['student','teacher'].includes(u.role))) {
       const normalized = { ...clean(raw), id: normalizeUserId(raw.id) };
       if (normalized.id) localMap.set(logicalUserKey(normalized), normalized);
     }
@@ -1547,160 +1716,437 @@ export default function App() {
 
     const comparable = value => {
       const x = clean(value || {});
-      delete x._docId;
-      delete x.uid;
-      delete x.updatedAt;
-      delete x.createdAt;
-      delete x.email;
+      ['_docId','uid','updatedAt','createdAt','email','schemaVersion'].forEach(k => delete x[k]);
       return x;
     };
 
     const changedKeys = new Set();
     for (const [key, nextUser] of nextMap.entries()) {
       const before = localMap.get(key);
-      if (forceCanonicalize || !before || JSON.stringify(comparable(before)) !== JSON.stringify(comparable(nextUser))) {
-        changedKeys.add(key);
-      }
+      if (forceCanonicalize || !before || JSON.stringify(comparable(before)) !== JSON.stringify(comparable(nextUser))) changedKeys.add(key);
     }
-    for (const key of localMap.keys()) {
-      if (!nextMap.has(key)) changedKeys.add(key);
-    }
+    for (const key of localMap.keys()) if (!nextMap.has(key)) changedKeys.add(key);
 
-    // อ่านฐานข้อมูลจริง ณ เวลาบันทึก เพื่อ merge กับข้อมูลล่าสุดก่อนเขียน
+    if (!changedKeys.size) return;
+
     const remoteSnap = await getDocs(collection(firestore, 'users'));
     const remoteUsers = remoteSnap.docs.map(d => ({ ...d.data(), _docId: d.id }));
     const remoteByKey = new Map();
     for (const u of remoteUsers) {
-      if (!['student','teacher'].includes(u.role) || u.active === false || !normalizeUserId(u.id)) continue;
+      if (!['student','teacher'].includes(u.role) || !normalizeUserId(u.id)) continue;
       const key = logicalUserKey(u);
       const arr = remoteByKey.get(key) || [];
       arr.push(u);
       remoteByKey.set(key, arr);
     }
 
+    const operations = [];
     for (const [key, u] of nextMap.entries()) {
       if (!changedKeys.has(key)) continue;
-
-      const candidates = (remoteByKey.get(key) || [])
-        .slice()
-        .sort((a, b) => Number(a.updatedAt || a.createdAt || 0) - Number(b.updatedAt || b.createdAt || 0));
-
-      let mergedRemote = {};
-      for (const candidate of candidates) mergedRemote = { ...mergedRemote, ...candidate };
+      const candidates = (remoteByKey.get(key) || []).slice().sort((a,b) => toMillis(a.updatedAt || a.createdAt) - toMillis(b.updatedAt || b.createdAt));
+      let merged = {};
+      for (const candidate of candidates) merged = { ...merged, ...candidate };
+      merged = { ...merged, ...u };
 
       const docId = canonicalUserDocId(u);
-      const profile = {
-        ...clean(mergedRemote),
-        ...clean(u),
+      const base = {
         id: normalizeUserId(u.id),
-        uid: docId,
+        role: u.role,
+        title: String(merged.title || ''),
+        fname: String(merged.fname || ''),
+        lname: String(merged.lname || ''),
         active: true,
-        updatedAt: Date.now()
+        createdAt: toMillis(merged.createdAt) || Date.now(),
+        updatedAt: Date.now(),
+        schemaVersion: DB_SCHEMA_VERSION
       };
-      delete profile._docId;
-      delete profile.email;
+      const profile = u.role === 'student' ? {
+        ...base,
+        level: String(merged.level || ''),
+        room: String(merged.room || '')
+      } : {
+        ...base,
+        teacherPasswordSet: merged.teacherPasswordSet === true,
+        teacherPasswordHash: String(merged.teacherPasswordHash || ''),
+        teacherPasswordSalt: String(merged.teacherPasswordSalt || ''),
+        teacherTempHash: String(merged.teacherTempHash || ''),
+        teacherTempSalt: String(merged.teacherTempSalt || ''),
+        teacherPasswordUpdatedAt: toMillis(merged.teacherPasswordUpdatedAt) || 0
+      };
 
-      await setDoc(doc(firestore, 'users', docId), profile, { merge: true });
-
-      // ลบเอกสารซ้ำ/legacy เฉพาะคนที่กำลังบันทึก หรือระหว่าง repair
+      operations.push({ type:'set', ref:doc(firestore,'users',docId), data:profile });
       for (const candidate of candidates) {
-        if (candidate._docId && candidate._docId !== docId) {
-          await deleteDoc(doc(firestore, 'users', candidate._docId));
-        }
+        if (candidate._docId && candidate._docId !== docId) operations.push({ type:'delete', ref:doc(firestore,'users',candidate._docId) });
       }
     }
 
-    // ลบเฉพาะ student/teacher ที่ผู้ใช้ลบออกจากรายการจริง
-    for (const remote of remoteUsers) {
-      if (!['student','teacher'].includes(remote.role) || !normalizeUserId(remote.id)) continue;
-      const key = logicalUserKey(remote);
-      if (!nextMap.has(key) && changedKeys.has(key) && remote._docId) {
-        await deleteDoc(doc(firestore, 'users', remote._docId));
+    for (const key of changedKeys) {
+      if (nextMap.has(key)) continue;
+      for (const candidate of remoteByKey.get(key) || []) {
+        if (candidate._docId) operations.push({ type:'delete', ref:doc(firestore,'users',candidate._docId) });
       }
     }
+
+    await commitOperations(operations);
   };
 
   const syncGroups = async nextGroups => {
+    const liveDb = dbRef.current;
     const normalizeGroup = g => ({
       ...clean(g),
       id: String(g.id),
       teacherId: g.teacherId != null ? String(g.teacherId).trim() : '',
-      members: (g.members || []).map(id => String(id).trim())
+      members: Array.from(new Set((g.members || []).map(id => String(id).trim()).filter(Boolean)))
     });
     const core = g => {
       const x = normalizeGroup(g);
-      delete x.updatedAt;
-      delete x._docId;
-      delete x.teacherUid;
-      delete x.memberUids;
+      ['updatedAt','createdAt','_docId','schemaVersion','teacherName','teacherUid','memberUids'].forEach(k => delete x[k]);
       return x;
     };
 
-    const prevMap = new Map(db.groups.map(g => [String(g.id), g]));
+    const prevMap = new Map(liveDb.groups.map(g => [String(g.id), g]));
     const nextMap = new Map(nextGroups.map(g => [String(g.id), normalizeGroup(g)]));
+    const operations = [];
 
     for (const [id, g] of nextMap.entries()) {
       const before = prevMap.get(id);
       if (before && JSON.stringify(core(before)) === JSON.stringify(core(g))) continue;
-      const teacher = db.users.find(u => u.role === 'teacher' && String(u.id) === String(g.teacherId));
-      const enriched = {
-        ...g,
-        teacherName: teacher ? `${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''}`.trim() : (g.teacherName || ''),
-        updatedAt: Date.now()
+      const teacher = liveDb.users.find(u => u.role === 'teacher' && String(u.id) === String(g.teacherId));
+      const canonical = {
+        id,
+        name: String(g.name || ''),
+        teacherId: String(g.teacherId || ''),
+        teacherName: teacher ? `${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''}`.trim() : String(g.teacherName || ''),
+        level: String(g.level || ''),
+        room: String(g.room || ''),
+        members: g.members || [],
+        milestones: Array.isArray(g.milestones) ? g.milestones : [],
+        links: Array.isArray(g.links) ? g.links : [],
+        createdAt: toMillis(before?.createdAt || g.createdAt) || Date.now(),
+        updatedAt: Date.now(),
+        schemaVersion: DB_SCHEMA_VERSION
       };
-      await setDoc(doc(firestore, 'groups', id), enriched);
+      operations.push({ type:'set', ref:doc(firestore,'groups',id), data:canonical });
     }
 
     for (const [id] of prevMap.entries()) {
-      if (!nextMap.has(id)) await deleteDoc(doc(firestore, 'groups', id));
+      if (!nextMap.has(id)) operations.push({ type:'delete', ref:doc(firestore,'groups',id) });
     }
+    await commitOperations(operations);
   };
 
   const syncSimpleCollection = async (name, prev, next) => {
     const cleanCore = item => {
       const x = clean(item);
-      delete x.updatedAt;
-      delete x._docId;
+      ['updatedAt','createdAt','_docId','schemaVersion'].forEach(k => delete x[k]);
       if (x.teacherId != null) x.teacherId = String(x.teacherId).trim();
       if (x.studentId != null) x.studentId = String(x.studentId).trim();
+      if (x.groupId != null) x.groupId = String(x.groupId).trim();
       return x;
     };
     const prevMap = new Map((prev || []).map(item => [String(item.id), item]));
     const nextMap = new Map((next || []).map(item => [String(item.id), cleanCore(item)]));
+    const operations = [];
 
     for (const [id, item] of nextMap.entries()) {
       const before = prevMap.get(id);
       if (before && JSON.stringify(cleanCore(before)) === JSON.stringify(item)) continue;
-      await setDoc(doc(firestore, name, id), { ...item, updatedAt: Date.now() });
+      const data = {
+        ...item,
+        id,
+        createdAt: toMillis(before?.createdAt) || toMillis(item.createdAt) || Date.now(),
+        updatedAt: Date.now(),
+        schemaVersion: DB_SCHEMA_VERSION
+      };
+      operations.push({ type:'set', ref:doc(firestore,name,id), data });
     }
-    for (const [id] of prevMap.entries()) {
-      if (!nextMap.has(id)) await deleteDoc(doc(firestore, name, id));
-    }
+    for (const [id] of prevMap.entries()) if (!nextMap.has(id)) operations.push({ type:'delete', ref:doc(firestore,name,id) });
+    await commitOperations(operations);
   };
 
   const handleUpdate = async (collectionKey, newData) => {
-    const previous = db[collectionKey];
-    setDb(prev => ({ ...prev, [collectionKey]: newData }));
-    try {
+    const execute = async () => {
       await ensureAnonymousSession();
-      if (collectionKey === 'catalogs') await setDoc(doc(firestore, 'catalogs', 'default'), clean(newData));
-      else if (collectionKey === 'users') await syncUsers(newData);
-      else if (collectionKey === 'groups') await syncGroups(newData);
-      else if (collectionKey === 'templates') await syncSimpleCollection('templates', db.templates, newData);
-      else if (collectionKey === 'submissions') await syncSimpleCollection('submissions', db.submissions, newData);
-
-      let fresh = await loadAllData();
-      if (currentUser && role) {
-        const refreshed = fresh.users.find(u => u.role === currentUser.role && String(u.id) === String(currentUser.id));
-        if (refreshed) setCurrentUser(refreshed);
+      const liveDb = dbRef.current;
+      if (collectionKey === 'catalogs') {
+        await setDoc(doc(firestore, 'catalogs', 'default'), { ...clean(newData), schemaVersion: DB_SCHEMA_VERSION, updatedAt: Date.now() });
+      } else if (collectionKey === 'users') {
+        await syncUsers(newData);
+      } else if (collectionKey === 'groups') {
+        await syncGroups(newData);
+      } else if (collectionKey === 'templates') {
+        await syncSimpleCollection('templates', liveDb.templates, newData);
+      } else if (collectionKey === 'submissions') {
+        await syncSimpleCollection('submissions', liveDb.submissions, newData);
+      } else {
+        throw new Error(`ไม่รู้จักชุดข้อมูล ${collectionKey}`);
       }
       return true;
+    };
+
+    const task = writeQueueRef.current.then(execute, execute);
+    writeQueueRef.current = task.catch(() => {});
+    try {
+      return await task;
     } catch (err) {
-      console.error(err);
-      setDb(prev => ({ ...prev, [collectionKey]: previous }));
+      console.error('save', collectionKey, err);
       showToast(`บันทึกไม่สำเร็จ: ${err?.message || err}`, 'error');
       return false;
     }
+  };
+
+  const inspectSystem = async () => {
+    await ensureAnonymousSession();
+    const [usersRaw, groupsRaw, templatesRaw, submissionsRaw, ...legacyResults] = await Promise.all([
+      getDocsArray('users'),
+      getDocsArray('groups'),
+      getDocsArray('templates'),
+      getDocsArray('submissions'),
+      ...LEGACY_COLLECTIONS.map(name => getDocsArray(name))
+    ]);
+
+    const activeUsers = usersRaw.filter(u => u.active !== false && ['student','teacher','admin'].includes(u.role) && normalizeUserId(u.id));
+    const counts = new Map();
+    for (const u of activeUsers) {
+      const key = logicalUserKey(u);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    const duplicateUserDocs = [...counts.values()].reduce((sum, n) => sum + Math.max(0, n - 1), 0);
+    const legacyDocs = legacyResults.reduce((sum, rows) => sum + rows.length, 0);
+
+    const users = normalizeUsersData(usersRaw);
+    const studentIds = new Set(users.filter(u => u.role === 'student').map(u => String(u.id)));
+    const teacherIds = new Set(users.filter(u => u.role === 'teacher').map(u => String(u.id)));
+    const groupIds = new Set(groupsRaw.map(g => String(g.id ?? g._docId)));
+    let orphanRefs = 0;
+    for (const g of groupsRaw) {
+      if (g.teacherId && !teacherIds.has(String(g.teacherId).trim())) orphanRefs++;
+      for (const mid of g.members || []) if (!studentIds.has(String(mid).trim())) orphanRefs++;
+    }
+    for (const t of templatesRaw) if (t.teacherId && !teacherIds.has(String(t.teacherId).trim())) orphanRefs++;
+    for (const sub of submissionsRaw) {
+      if (sub.studentId && !studentIds.has(String(sub.studentId).trim())) orphanRefs++;
+      if (sub.groupId && !groupIds.has(String(sub.groupId).trim())) orphanRefs++;
+    }
+
+    const result = {
+      version: APP_VERSION,
+      rawUserDocs: usersRaw.length,
+      uniqueUsers: users.length,
+      duplicateUserDocs,
+      legacyDocs,
+      orphanRefs,
+      students: users.filter(u=>u.role==='student').length,
+      teachers: users.filter(u=>u.role==='teacher').length,
+      groups: groupsRaw.length,
+      templates: templatesRaw.length,
+      submissions: submissionsRaw.length,
+      checkedAt: Date.now()
+    };
+    setSystemHealth(result);
+    return result;
+  };
+
+  const exportBackup = async () => {
+    try {
+      await ensureAnonymousSession();
+      const [users, groups, templates, submissions, catalogsSnap, systemSnap, ...legacyResults] = await Promise.all([
+        getDocsArray('users'),
+        getDocsArray('groups'),
+        getDocsArray('templates'),
+        getDocsArray('submissions'),
+        getDoc(doc(firestore,'catalogs','default')),
+        getDoc(doc(firestore,'system','app')),
+        ...LEGACY_COLLECTIONS.map(name => getDocsArray(name))
+      ]);
+      const legacy = {};
+      LEGACY_COLLECTIONS.forEach((name, i) => { legacy[name] = legacyResults[i]; });
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        appVersion: APP_VERSION,
+        schemaVersion: DB_SCHEMA_VERSION,
+        data: { users, groups, templates, submissions, catalogs: catalogsSnap.exists() ? catalogsSnap.data() : null, system: systemSnap.exists() ? systemSnap.data() : null },
+        legacy
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `DMD_Project_Tracking_Backup_${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      showToast('สร้างไฟล์สำรองข้อมูลแล้ว');
+      return true;
+    } catch (err) {
+      console.error('backup', err);
+      showToast(`สำรองข้อมูลไม่สำเร็จ: ${err?.message || err}`, 'error');
+      return false;
+    }
+  };
+
+  const cleanupSystem = async () => {
+    await ensureAnonymousSession();
+    const [usersRaw, groupsRaw, templatesRaw, submissionsRaw, catSnap, ...legacyResults] = await Promise.all([
+      getDocsArray('users'),
+      getDocsArray('groups'),
+      getDocsArray('templates'),
+      getDocsArray('submissions'),
+      getDoc(doc(firestore,'catalogs','default')),
+      ...LEGACY_COLLECTIONS.map(name => getDocsArray(name))
+    ]);
+
+    const operations = [];
+    const catalogData = catSnap.exists() ? catSnap.data() : {};
+    const cleanupLevels = Array.from(new Set((catalogData.levels?.length ? catalogData.levels : DEFAULT_LEVELS).map(v=>String(v).trim()).filter(Boolean)));
+    const cleanupRooms = Array.from(new Set((catalogData.rooms?.length ? catalogData.rooms : DEFAULT_ROOMS).map(v=>String(v).trim()).filter(Boolean)));
+    const canonicalUsers = new Map();
+    const grouped = new Map();
+
+    for (const u of usersRaw) {
+      if ((u.role === 'disabled' || u.active === false) && u._docId) {
+        operations.push({ type:'delete', ref:doc(firestore,'users',u._docId) });
+        continue;
+      }
+      if (!['student','teacher','admin'].includes(u.role) || !normalizeUserId(u.id)) continue;
+      const key = logicalUserKey(u);
+      const arr = grouped.get(key) || [];
+      arr.push(u); grouped.set(key, arr);
+    }
+
+    for (const [key, rows] of grouped.entries()) {
+      rows.sort((a,b) => toMillis(a.updatedAt || a.createdAt) - toMillis(b.updatedAt || b.createdAt));
+      let merged = {};
+      for (const row of rows) merged = { ...merged, ...row };
+      const roleName = String(merged.role);
+      const id = normalizeUserId(merged.id);
+      const docId = canonicalUserDocId({ role:roleName, id });
+      const base = {
+        id, role:roleName,
+        title:String(merged.title || ''), fname:String(merged.fname || ''), lname:String(merged.lname || ''),
+        active:true,
+        createdAt:toMillis(merged.createdAt) || Date.now(),
+        updatedAt:Date.now(), schemaVersion:DB_SCHEMA_VERSION
+      };
+      const profile = roleName === 'student' ? {
+        ...base, level:canonicalFromList(merged.level, cleanupLevels, cleanupLevels[0] || ''), room:canonicalFromList(merged.room, cleanupRooms, cleanupRooms[0] || '')
+      } : roleName === 'teacher' ? {
+        ...base,
+        teacherPasswordSet: merged.teacherPasswordSet === true,
+        teacherPasswordHash:String(merged.teacherPasswordHash || ''),
+        teacherPasswordSalt:String(merged.teacherPasswordSalt || ''),
+        teacherTempHash:String(merged.teacherTempHash || ''),
+        teacherTempSalt:String(merged.teacherTempSalt || ''),
+        teacherPasswordUpdatedAt:toMillis(merged.teacherPasswordUpdatedAt) || 0
+      } : base;
+      canonicalUsers.set(key, profile);
+      operations.push({ type:'set', ref:doc(firestore,'users',docId), data:profile });
+      for (const row of rows) if (row._docId && row._docId !== docId) operations.push({ type:'delete', ref:doc(firestore,'users',row._docId) });
+    }
+
+    const teacherById = new Map([...canonicalUsers.values()].filter(u=>u.role==='teacher').map(u=>[String(u.id),u]));
+    const groupIdMap = new Map();
+    for (const g of groupsRaw) groupIdMap.set(String(g.id ?? g._docId), String(g._docId));
+
+    for (const g of groupsRaw) {
+      const id = String(g._docId);
+      const teacherId = g.teacherId != null ? String(g.teacherId).trim() : '';
+      const teacher = teacherById.get(teacherId);
+      const milestones = (Array.isArray(g.milestones) ? g.milestones : []).map((m, idx) => ({
+        id:String(m.id || makeEntityId('m')),
+        order:idx + 1,
+        desc:String(m.desc || ''),
+        percent:Number(m.percent || 0),
+        status:['pending','approved','rejected'].includes(m.status) ? m.status : 'pending',
+        assignDate:String(m.assignDate || ''),
+        dueDate:String(m.dueDate || '')
+      }));
+      const canonical = {
+        id,
+        name:String(g.name || ''),
+        teacherId,
+        teacherName:teacher ? `${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''}`.trim() : String(g.teacherName || ''),
+        level:canonicalFromList(g.level, cleanupLevels, cleanupLevels[0] || ''), room:canonicalFromList(g.room, cleanupRooms, cleanupRooms[0] || ''),
+        members:Array.from(new Set((g.members || []).map(v=>String(v).trim()).filter(Boolean))),
+        milestones,
+        links:Array.isArray(g.links) ? g.links : [],
+        createdAt:toMillis(g.createdAt) || Date.now(), updatedAt:Date.now(), schemaVersion:DB_SCHEMA_VERSION
+      };
+      operations.push({ type:'set', ref:doc(firestore,'groups',id), data:canonical });
+    }
+
+    for (const t of templatesRaw) {
+      const id = String(t._docId);
+      operations.push({ type:'set', ref:doc(firestore,'templates',id), data:{
+        id,
+        teacherId:String(t.teacherId || '').trim(),
+        name:String(t.name || ''),
+        milestones:(Array.isArray(t.milestones) ? t.milestones : []).map(m=>({ desc:String(m.desc || ''), percent:Number(m.percent || 0) })),
+        createdAt:toMillis(t.createdAt) || Date.now(), updatedAt:Date.now(), schemaVersion:DB_SCHEMA_VERSION
+      }});
+    }
+
+    for (const sub of submissionsRaw) {
+      const id = String(sub._docId);
+      const oldGroupId = String(sub.groupId || '').trim();
+      operations.push({ type:'set', ref:doc(firestore,'submissions',id), data:{
+        id,
+        groupId:groupIdMap.get(oldGroupId) || oldGroupId,
+        studentId:String(sub.studentId || '').trim(),
+        url:String(sub.url || ''),
+        createdAt:toMillis(sub.createdAt) || Date.now(), updatedAt:Date.now(), schemaVersion:DB_SCHEMA_VERSION
+      }});
+    }
+
+    operations.push({ type:'set', ref:doc(firestore,'catalogs','default'), data:{
+      levels:cleanupLevels,
+      rooms:cleanupRooms,
+      updatedAt:Date.now(), schemaVersion:DB_SCHEMA_VERSION
+    }});
+
+    LEGACY_COLLECTIONS.forEach((name, i) => {
+      for (const row of legacyResults[i]) if (row._docId) operations.push({ type:'delete', ref:doc(firestore,name,row._docId) });
+    });
+
+    operations.push({ type:'set', ref:doc(firestore,'system','app'), data:{
+      appVersion:APP_VERSION, schemaVersion:DB_SCHEMA_VERSION,
+      cleanupCompleted:true, cleanupAt:Date.now(),
+      activeCollections:[...ACTIVE_COLLECTIONS,'catalogs','system']
+    }, options:{ merge:true } });
+
+    await commitOperations(operations);
+    await loadAllData();
+    const health = await inspectSystem();
+    return {
+      canonicalUsers: canonicalUsers.size,
+      deletedDocs: operations.filter(op=>op.type==='delete').length,
+      health
+    };
+  };
+
+  const deleteAllStudentsRemote = async () => {
+    await ensureAnonymousSession();
+    const [usersRaw, groupsRaw, submissionsRaw] = await Promise.all([
+      getDocsArray('users'), getDocsArray('groups'), getDocsArray('submissions')
+    ]);
+    const studentIds = new Set(usersRaw.filter(u=>u.role==='student').map(u=>normalizeUserId(u.id)).filter(Boolean));
+    const operations = [];
+    let groupUpdates = 0;
+    for (const u of usersRaw) if (u.role === 'student' && u._docId) operations.push({ type:'delete', ref:doc(firestore,'users',u._docId) });
+    for (const s of submissionsRaw) if (studentIds.has(String(s.studentId || '').trim()) && s._docId) operations.push({ type:'delete', ref:doc(firestore,'submissions',s._docId) });
+    for (const g of groupsRaw) {
+      const members = (g.members || []).map(v=>String(v).trim());
+      const nextMembers = members.filter(id=>!studentIds.has(id));
+      if (nextMembers.length !== members.length) {
+        groupUpdates++;
+        operations.push({ type:'set', ref:doc(firestore,'groups',g._docId), data:{ members:nextMembers, updatedAt:Date.now(), schemaVersion:DB_SCHEMA_VERSION }, options:{ merge:true } });
+      }
+    }
+    await commitOperations(operations);
+    await loadAllData();
+    return {
+      students: studentIds.size,
+      submissions: submissionsRaw.filter(s=>studentIds.has(String(s.studentId || '').trim())).length,
+      groups: groupUpdates
+    };
   };
 
   const completeTeacherFirstPassword = async () => {
@@ -1732,7 +2178,8 @@ export default function App() {
     try {
       setLoading(true);
       await ensureAnonymousSession();
-      let fresh = await loadAllData();
+      let fresh = dbRef.current;
+      if (!fresh?.users?.length) fresh = await loadAllData();
 
       if (role === 'parent') {
         const q = searchQuery.trim().toLowerCase();
@@ -1756,12 +2203,9 @@ export default function App() {
         if (!loginPassword) throw new Error('กรุณากรอกรหัสผ่านผู้จัดการระบบ');
         if (loginPassword !== ADMIN_PASSWORD) throw new Error('รหัสผ่านผู้จัดการระบบไม่ถูกต้อง');
 
-        // ซ่อมเอกสาร user ซ้ำจากเวอร์ชันเก่าอัตโนมัติเมื่อ Admin เข้าใช้งาน
-        // ทำให้ยอดนักศึกษา/อาจารย์ตรงกับรหัสที่ไม่ซ้ำ และย้ายไป document id มาตรฐาน
-        await syncUsers(fresh.users, { forceCanonicalize: true });
-        fresh = await loadAllData();
-        user = fresh.users.find(u => u.role === role && String(u.id).trim().toLowerCase() === rawId.toLowerCase());
-        if (!user) throw new Error('ไม่พบข้อมูลผู้จัดการระบบหลังตรวจสอบฐานข้อมูล');
+        // v7.7: ห้ามซ่อม/เขียนข้อมูลนักศึกษาและอาจารย์ทั้งหมดตอน Admin login
+        // เพราะเมื่อมีข้อมูลจำนวนมากจะทำให้หน้าโหลดค้างและเสี่ยงเขียนข้อมูลทับกัน
+        // การ login จึงทำเฉพาะตรวจรหัสผ่านและเปิดหน้า Admin เท่านั้น
       }
 
       if (role === 'teacher') {
@@ -1808,7 +2252,7 @@ export default function App() {
   };
 
   if (loading) {
-    return <div className="min-h-screen bg-gray-50 flex flex-col justify-center items-center p-4"><Loader2 className="animate-spin text-blue-600 mb-4" size={48}/><h2 className="text-xl font-semibold text-gray-700">DMD Integrated Project Tracking System</h2><p className="text-sm text-gray-500 mt-2">โปรดรอสักครู่</p></div>;
+    return <div className="min-h-screen bg-gray-50 flex flex-col justify-center items-center p-4"><Loader2 className="animate-spin text-blue-600 mb-4" size={48}/><h2 className="text-xl font-semibold text-gray-700">DMD Integrated Project Tracking System</h2><p className="text-sm text-gray-500 mt-2">โปรดรอสักครู่</p><p className="text-[11px] text-gray-400 mt-1">v{APP_VERSION}</p></div>;
   }
 
   if (!role || !currentUser) {
@@ -1855,9 +2299,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-50/50 font-sans text-gray-900 flex flex-col relative">
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-40 shadow-sm"><div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between"><div className="flex items-center gap-3"><div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold">D</div><h1 className="font-bold text-lg hidden sm:block">DMD Project Tracking</h1></div><div className="flex items-center gap-4"><div className="text-right hidden md:block"><p className="text-sm font-semibold">{currentUser.title}{currentUser.fname} {currentUser.lname}</p><p className="text-xs text-gray-500 capitalize">{role}</p></div><button onClick={logout} className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg flex items-center gap-2 text-sm font-medium"><LogOut size={18}/> <span className="hidden sm:inline">ออกจากระบบ</span></button></div></div></header>
+      <header className="bg-white border-b border-gray-200 sticky top-0 z-40 shadow-sm"><div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between"><div className="flex items-center gap-3"><div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold">D</div><div><h1 className="font-bold text-lg hidden sm:block">DMD Project Tracking</h1><p className="text-[10px] text-gray-400 hidden sm:block">v{APP_VERSION}</p></div></div><div className="flex items-center gap-4"><div className="text-right hidden md:block"><p className="text-sm font-semibold">{currentUser.title}{currentUser.fname} {currentUser.lname}</p><p className="text-xs text-gray-500 capitalize">{role}</p></div><button onClick={logout} className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg flex items-center gap-2 text-sm font-medium"><LogOut size={18}/> <span className="hidden sm:inline">ออกจากระบบ</span></button></div></div></header>
       <main className="flex-grow w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 animate-in fade-in duration-500">
-        {role === 'admin' && <AdminView db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt} currentUser={currentUser}/>} 
+        {role === 'admin' && <AdminView db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt} currentUser={currentUser} systemHealth={systemHealth} inspectSystem={inspectSystem} cleanupSystem={cleanupSystem} exportBackup={exportBackup} deleteAllStudentsRemote={deleteAllStudentsRemote}/>} 
         {role === 'teacher' && <TeacherView user={currentUser} db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt}/>} 
         {role === 'student' && <ProgressDashboard db={db} targetStudent={currentUser} isParent={false} handleUpdate={handleUpdate} showToast={showToast} askPrompt={askPrompt}/>} 
         {role === 'parent' && <ProgressDashboard db={db} targetStudent={currentUser} isParent={true}/>} 
