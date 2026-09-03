@@ -12,7 +12,7 @@ import {
 const DEFAULT_LEVELS = ['ปวช. 1', 'ปวช. 2', 'ปวช. 3', 'ปวส. 1', 'ปวส. 2'];
 const DEFAULT_ROOMS = ['1', '2', '3', '4'];
 const ADMIN_PASSWORD = '995622';
-const APP_VERSION = '8.0.2';
+const APP_VERSION = '8.0.3';
 const DB_SCHEMA_VERSION = 8;
 const ACTIVE_COLLECTIONS = ['users', 'groups', 'templates', 'submissions'];
 const LEGACY_COLLECTIONS = ['loginIndex', 'authProfiles', 'sessions', 'publicStudents', 'publicProjects', 'publicStats', 'auditLogs'];
@@ -1661,6 +1661,11 @@ export default function App() {
     try {
       const saved = JSON.parse(sessionStorage.getItem('dmd_web_session') || 'null');
       if (!saved?.role) return;
+      if (saved.role === 'admin' && String(saved.id || '').toLowerCase() === 'admin') {
+        setRole('admin');
+        setCurrentUser({ uid:'admin_default', id:'admin', role:'admin', title:'', fname:'ผู้จัดการ', lname:'ระบบ', active:true });
+        return;
+      }
       if (saved.role === 'parent') {
         const student = nextDb.users.find(u => u.role === 'student' && String(u.id) === String(saved.id));
         if (student) { setRole('parent'); setCurrentUser(student); }
@@ -1677,10 +1682,9 @@ export default function App() {
       try {
         setLoading(true);
         await ensureAnonymousSession();
-        await withTimeout(ensureBaseData(), 20000, 'การเตรียมฐานข้อมูล');
-        const nextDb = await withTimeout(loadAllData(), 60000, 'การโหลดข้อมูล');
+        // v8.0.3: ไม่อ่าน/เขียนฐานข้อมูลก้อนใหญ่ก่อนเปิดหน้าเว็บ
+        // เปิดหน้าระบบทันทีหลัง Anonymous Auth พร้อม แล้วให้ realtime listeners โหลดข้อมูลเบื้องหลัง
         if (!cancelled) {
-          restoreWebSession(nextDb);
           subscribeRealtime();
         }
       } catch (err) {
@@ -2188,8 +2192,25 @@ export default function App() {
     try {
       setLoading(true);
       await ensureAnonymousSession();
+
+      // Admin v8.0.3 เข้าระบบได้ทันทีโดยไม่รอโหลด users ทั้งฐาน
+      if (role === 'admin') {
+        const rawAdminId = loginId.trim();
+        if (!rawAdminId) throw new Error('กรุณากรอกรหัสผู้ใช้งาน');
+        if (rawAdminId.toLowerCase() !== 'admin') throw new Error('รหัสผู้จัดการระบบไม่ถูกต้อง');
+        if (!loginPassword) throw new Error('กรุณากรอกรหัสผ่านผู้จัดการระบบ');
+        if (loginPassword !== ADMIN_PASSWORD) throw new Error('รหัสผ่านผู้จัดการระบบไม่ถูกต้อง');
+        const adminUser = dbRef.current.users.find(u => u.role === 'admin' && String(u.id).trim().toLowerCase() === 'admin') || {
+          uid: 'admin_default', id: 'admin', role: 'admin', title: '', fname: 'ผู้จัดการ', lname: 'ระบบ', active: true
+        };
+        setCurrentUser(adminUser);
+        sessionStorage.setItem('dmd_web_session', JSON.stringify({ role: 'admin', id: 'admin' }));
+        showToast('เข้าสู่ระบบสำเร็จ ยินดีต้อนรับผู้จัดการระบบ');
+        return;
+      }
+
       let fresh = dbRef.current;
-      if (!fresh?.users?.length) fresh = await loadAllData();
+      if (!fresh?.users?.length) fresh = await withTimeout(loadAllData(), 30000, 'การโหลดข้อมูลผู้ใช้งาน');
 
       if (role === 'parent') {
         const q = searchQuery.trim().toLowerCase();
@@ -2206,17 +2227,9 @@ export default function App() {
 
       const rawId = loginId.trim();
       if (!rawId) throw new Error('กรุณากรอกรหัสผู้ใช้งาน');
+
       let user = fresh.users.find(u => u.role === role && String(u.id).trim().toLowerCase() === rawId.toLowerCase());
       if (!user) throw new Error('รหัสผู้ใช้งานไม่ถูกต้อง หรือยังไม่มีรหัสนี้ในระบบ');
-
-      if (role === 'admin') {
-        if (!loginPassword) throw new Error('กรุณากรอกรหัสผ่านผู้จัดการระบบ');
-        if (loginPassword !== ADMIN_PASSWORD) throw new Error('รหัสผ่านผู้จัดการระบบไม่ถูกต้อง');
-
-        // v7.7: ห้ามซ่อม/เขียนข้อมูลนักศึกษาและอาจารย์ทั้งหมดตอน Admin login
-        // เพราะเมื่อมีข้อมูลจำนวนมากจะทำให้หน้าโหลดค้างและเสี่ยงเขียนข้อมูลทับกัน
-        // การ login จึงทำเฉพาะตรวจรหัสผ่านและเปิดหน้า Admin เท่านั้น
-      }
 
       if (role === 'teacher') {
         if (!loginPassword) throw new Error('กรุณากรอกรหัสผ่าน');
