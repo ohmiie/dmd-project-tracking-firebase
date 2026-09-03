@@ -12,7 +12,7 @@ import {
 const DEFAULT_LEVELS = ['ปวช. 1', 'ปวช. 2', 'ปวช. 3', 'ปวส. 1', 'ปวส. 2'];
 const DEFAULT_ROOMS = ['1', '2', '3', '4'];
 const ADMIN_PASSWORD = '995622';
-const APP_VERSION = '8.0.1';
+const APP_VERSION = '8.0.2';
 const DB_SCHEMA_VERSION = 8;
 const ACTIVE_COLLECTIONS = ['users', 'groups', 'templates', 'submissions'];
 const LEGACY_COLLECTIONS = ['loginIndex', 'authProfiles', 'sessions', 'publicStudents', 'publicProjects', 'publicStats', 'auditLogs'];
@@ -1564,18 +1564,20 @@ export default function App() {
   };
 
   const ensureBaseData = async () => {
-    const [usersSnap, catSnap] = await Promise.all([
-      getDocs(collection(firestore, 'users')),
-      getDoc(doc(firestore, 'catalogs', 'default'))
+    // v8.0.2: ห้ามสแกน users ทั้ง collection ตอนเปิดเว็บ
+    // เดิม getDocs(users) ทำให้ระบบค้างเมื่อมีนักศึกษาจำนวนมาก
+    const adminRef = doc(firestore, 'users', 'admin_default');
+    const catalogRef = doc(firestore, 'catalogs', 'default');
+    const systemRef = doc(firestore, 'system', 'app');
+
+    const [adminSnap, catSnap] = await Promise.all([
+      getDoc(adminRef),
+      getDoc(catalogRef)
     ]);
 
-    const hasAdmin = usersSnap.docs.some(d => {
-      const u = d.data();
-      return u.role === 'admin' && String(u.id || '').trim().toLowerCase() === 'admin' && u.active !== false;
-    });
-
-    if (!hasAdmin) {
-      await setDoc(doc(firestore, 'users', 'admin_default'), {
+    const writes = [];
+    if (!adminSnap.exists()) {
+      writes.push(setDoc(adminRef, {
         uid: 'admin_default',
         id: 'admin',
         role: 'admin',
@@ -1583,20 +1585,28 @@ export default function App() {
         fname: 'ผู้จัดการ',
         lname: 'ระบบ',
         active: true,
-        createdAt: Date.now()
-      }, { merge: true });
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        schemaVersion: DB_SCHEMA_VERSION
+      }, { merge: true }));
     }
 
     if (!catSnap.exists()) {
-      await setDoc(doc(firestore, 'catalogs', 'default'), { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS, schemaVersion: DB_SCHEMA_VERSION });
+      writes.push(setDoc(catalogRef, {
+        levels: DEFAULT_LEVELS,
+        rooms: DEFAULT_ROOMS,
+        schemaVersion: DB_SCHEMA_VERSION
+      }, { merge: true }));
     }
 
-    await setDoc(doc(firestore, 'system', 'app'), {
+    writes.push(setDoc(systemRef, {
       appVersion: APP_VERSION,
       schemaVersion: DB_SCHEMA_VERSION,
       activeCollections: [...ACTIVE_COLLECTIONS, 'catalogs', 'system'],
       updatedAt: Date.now()
-    }, { merge: true });
+    }, { merge: true }));
+
+    await Promise.all(writes);
   };
 
   const loadAllData = async () => {
@@ -1667,8 +1677,8 @@ export default function App() {
       try {
         setLoading(true);
         await ensureAnonymousSession();
-        await withTimeout(ensureBaseData(), 15000, 'การเตรียมฐานข้อมูล');
-        const nextDb = await withTimeout(loadAllData(), 20000, 'การโหลดข้อมูล');
+        await withTimeout(ensureBaseData(), 20000, 'การเตรียมฐานข้อมูล');
+        const nextDb = await withTimeout(loadAllData(), 60000, 'การโหลดข้อมูล');
         if (!cancelled) {
           restoreWebSession(nextDb);
           subscribeRealtime();
