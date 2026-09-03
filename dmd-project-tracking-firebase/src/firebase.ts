@@ -1,5 +1,5 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
-import { browserLocalPersistence, getAuth, setPersistence } from 'firebase/auth';
+import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
 // Single production Firebase project used by DMD Integrated Project Tracking System.
@@ -14,7 +14,4 @@ export const firebaseConfig = {
 
 export const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const authReady = setPersistence(auth, browserLocalPersistence).catch((error) => {
-  console.error('Auth persistence setup failed', error);
-});
 export const db = getFirestore(app);
