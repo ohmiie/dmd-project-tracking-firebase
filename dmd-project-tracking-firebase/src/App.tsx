@@ -43,11 +43,6 @@ const hashTeacherSecret = async (secret, salt) => {
   return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
 };
 
-const generateTeacherSetupCode = () => {
-  const n = new Uint32Array(1);
-  window.crypto.getRandomValues(n);
-  return String(100000 + (n[0] % 900000));
-};
 
 const makeEntityId = (prefix) => {
   if (window.crypto?.randomUUID) return `${prefix}_${window.crypto.randomUUID()}`;
@@ -222,7 +217,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
   const [formData, setFormData] = useState({ id: '', title: '', fname: '', lname: '', level: LEVELS[0], room: ROOMS[0] });
-  const [setupCodeDialog, setSetupCodeDialog] = useState({ isOpen: false, code: '', teacherName: '' });
+  const [setupCodeDialog, setSetupCodeDialog] = useState({ isOpen: false, code: '123456', teacher: null, teacherName: '' });
   const fileInputRef = useRef(null);
 
   const isUserTab = activeTab === 'students' || activeTab === 'teachers';
@@ -233,11 +228,30 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
     let newUsers = [...db.users];
     const roleName = activeTab === 'students' ? 'student' : 'teacher';
     const isEdit = !!editingUser;
+    const initialPassword = String(formData.initialPassword || '').trim();
+    const { initialPassword: _initialPassword, ...safeFormData } = formData;
+
+    let teacherPasswordPatch = {};
+    if (roleName === 'teacher' && !isEdit) {
+      const code = initialPassword || '123456';
+      if (code.length < 6) return showToast('รหัสตั้งต้นต้องมีอย่างน้อย 6 ตัวอักษร', 'error');
+      const salt = makeSecuritySalt();
+      const tempHash = await hashTeacherSecret(code, salt);
+      teacherPasswordPatch = {
+        teacherPasswordSet: false,
+        teacherPasswordHash: '',
+        teacherPasswordSalt: '',
+        teacherTempHash: tempHash,
+        teacherTempSalt: salt,
+        teacherPasswordUpdatedAt: Date.now()
+      };
+    }
+
     if (isEdit) {
-      newUsers = newUsers.map(u => u.id === editingUser.id ? { ...u, ...formData, role: roleName } : u);
+      newUsers = newUsers.map(u => u.id === editingUser.id ? { ...u, ...safeFormData, role: roleName } : u);
     } else {
-      if (newUsers.find(u => u.id === formData.id)) return showToast('รหัสนี้มีในระบบแล้ว', 'error');
-      newUsers.push({ ...formData, role: roleName });
+      if (newUsers.find(u => u.id === safeFormData.id)) return showToast('รหัสนี้มีในระบบแล้ว', 'error');
+      newUsers.push({ ...safeFormData, ...teacherPasswordPatch, role: roleName });
     }
     const ok = await handleUpdate('users', newUsers);
     if (!ok) return;
@@ -252,8 +266,9 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
     });
   };
 
-  const issueTeacherSetupCode = async (teacher) => {
-    const code = generateTeacherSetupCode();
+  const issueTeacherSetupCode = async (teacher, codeValue) => {
+    const code = String(codeValue || '').trim();
+    if (code.length < 6) return showToast('รหัสตั้งต้นต้องมีอย่างน้อย 6 ตัวอักษร', 'error');
     const salt = makeSecuritySalt();
     const tempHash = await hashTeacherSecret(code, salt);
     const nextUsers = db.users.map(u => String(u.id) === String(teacher.id) && u.role === 'teacher' ? {
@@ -267,23 +282,22 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
     } : u);
     const ok = await handleUpdate('users', nextUsers);
     if (!ok) return;
+    setSetupCodeDialog({ isOpen: false, code: '123456', teacher: null, teacherName: '' });
+    showToast(`ตั้งรหัสตั้งต้น ${code} ให้อาจารย์แล้ว`);
+  };
+
+  const handleTeacherSetupCode = (teacher) => {
     setSetupCodeDialog({
       isOpen: true,
-      code,
+      code: '123456',
+      teacher,
       teacherName: `${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''}`.trim()
     });
   };
 
-  const handleTeacherSetupCode = (teacher) => {
-    const message = teacher.teacherPasswordSet
-      ? `ต้องการรีเซ็ตรหัสผ่านของ ${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''} หรือไม่? รหัสผ่านเดิมจะใช้งานไม่ได้ และระบบจะสร้างรหัสตั้งต้นใหม่`
-      : `สร้างรหัสตั้งต้นสำหรับ ${teacher.title || ''}${teacher.fname || ''} ${teacher.lname || ''} หรือไม่?`;
-    askConfirm(message, () => issueTeacherSetupCode(teacher));
-  };
-
   const openModal = (user = null) => {
     setEditingUser(user);
-    setFormData(user || { id: '', title: activeTab === 'teachers' ? 'อาจารย์' : 'นาย', fname: '', lname: '', level: LEVELS[0], room: ROOMS[0] });
+    setFormData(user ? { ...user, initialPassword: '' } : { id: '', title: activeTab === 'teachers' ? 'อาจารย์' : 'นาย', fname: '', lname: '', level: LEVELS[0], room: ROOMS[0], initialPassword: activeTab === 'teachers' ? '123456' : '' });
     setIsModalOpen(true);
   };
 
@@ -351,10 +365,26 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
         const imported = [...importedMap.values()];
         if (!imported.length) return showToast('ไม่พบข้อมูลที่ถูกต้องในไฟล์ CSV', 'error');
 
-        const mergedImported = imported.map(n => {
+        const mergedImported = [];
+        for (const n of imported) {
           const old = db.users.find(u => u.role === n.role && String(u.id).trim().toLowerCase() === String(n.id).trim().toLowerCase());
-          return old ? { ...old, ...n } : n;
-        });
+          if (roleName === 'teacher' && (!old || (!old.teacherPasswordSet && !old.teacherTempHash))) {
+            const salt = makeSecuritySalt();
+            const tempHash = await hashTeacherSecret('123456', salt);
+            mergedImported.push({
+              ...(old || {}),
+              ...n,
+              teacherPasswordSet: false,
+              teacherPasswordHash: '',
+              teacherPasswordSalt: '',
+              teacherTempHash: tempHash,
+              teacherTempSalt: salt,
+              teacherPasswordUpdatedAt: Date.now()
+            });
+          } else {
+            mergedImported.push(old ? { ...old, ...n } : n);
+          }
+        }
         const oldWithoutDup = db.users.filter(u => !mergedImported.some(n => n.role === u.role && String(n.id).trim().toLowerCase() === String(u.id).trim().toLowerCase()));
         const nextUsers = [...oldWithoutDup, ...mergedImported];
         const ok = await handleUpdate('users', nextUsers);
@@ -376,6 +406,34 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
       }
     };
     reader.readAsText(file);
+  };
+
+  const handleDeleteAllStudents = () => {
+    const studentIds = new Set(db.users.filter(u => u.role === 'student').map(u => String(u.id)));
+    const total = studentIds.size;
+    if (!total) return showToast('ยังไม่มีข้อมูลนักศึกษาให้ลบ', 'error');
+
+    askConfirm(`ต้องการลบนักศึกษาทั้งหมด ${total} คนหรือไม่? ระบบจะลบข้อมูลนักศึกษา ลิงก์ที่นักศึกษาส่ง และนำรายชื่อนักศึกษาออกจากทุกกลุ่ม การดำเนินการนี้ย้อนกลับไม่ได้`, async () => {
+      try {
+        const nextUsers = db.users.filter(u => u.role !== 'student');
+        const nextSubmissions = (db.submissions || []).filter(s => !studentIds.has(String(s.studentId)));
+        const nextGroups = (db.groups || []).map(g => ({
+          ...g,
+          members: (g.members || []).filter(id => !studentIds.has(String(id)))
+        }));
+
+        const usersOk = await handleUpdate('users', nextUsers);
+        if (!usersOk) return;
+        const submissionsOk = await handleUpdate('submissions', nextSubmissions);
+        if (!submissionsOk) return;
+        const groupsOk = await handleUpdate('groups', nextGroups);
+        if (!groupsOk) return;
+        showToast(`ลบนักศึกษาทั้งหมด ${total} คนเรียบร้อยแล้ว`);
+      } catch (err) {
+        console.error('delete all students', err);
+        showToast(`ลบนักศึกษาทั้งหมดไม่สำเร็จ: ${err?.message || err}`, 'error');
+      }
+    });
   };
 
   const updateCatalog = (key, next) => handleUpdate('catalogs', { ...(db.catalogs || {}), [key]: next });
@@ -442,9 +500,9 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
       {isUserTab && <div className="space-y-4">
         <div className="flex flex-col sm:flex-row justify-between gap-3">
           <div><h3 className="text-lg font-bold">{activeTab==='students'?'ข้อมูลนักศึกษา':'ข้อมูลอาจารย์'}</h3><p className="text-xs text-gray-500">เพิ่ม แก้ไข ลบ หรือนำเข้าด้วย CSV</p></div>
-          <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={downloadCSVTemplate}><Download size={16}/> ตัวอย่าง CSV</Button><input type="file" accept=".csv,text/csv" ref={fileInputRef} className="hidden" onChange={handleFileUpload}/><Button variant="secondary" onClick={()=>fileInputRef.current?.click()}><Upload size={16}/> นำเข้า CSV</Button><Button onClick={()=>openModal()}><Plus size={16}/> เพิ่ม</Button></div>
+          <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={downloadCSVTemplate}><Download size={16}/> ตัวอย่าง CSV</Button><input type="file" accept=".csv,text/csv" ref={fileInputRef} className="hidden" onChange={handleFileUpload}/><Button variant="secondary" onClick={()=>fileInputRef.current?.click()}><Upload size={16}/> นำเข้า CSV</Button>{activeTab==='students'&&<Button variant="danger" onClick={handleDeleteAllStudents}><Trash2 size={16}/> ลบนักศึกษาทั้งหมด</Button>}<Button onClick={()=>openModal()}><Plus size={16}/> เพิ่ม</Button></div>
         </div>
-        <Card className="overflow-x-auto"><table className="w-full text-sm min-w-[720px]"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left p-3">รหัส</th><th className="text-left p-3">ชื่อ-สกุล</th>{activeTab==='students'&&<th className="text-left p-3">ระดับชั้น / ห้อง</th>}{activeTab==='teachers'&&<th className="text-left p-3">รหัสผ่าน</th>}<th className="text-right p-3">จัดการ</th></tr></thead><tbody>{filteredUsers.map(user=><tr key={user.id} className="border-t hover:bg-gray-50"><td className="p-3 font-medium">{user.id}</td><td className="p-3">{user.title}{user.fname} {user.lname}</td>{activeTab==='students'&&<td className="p-3">{user.level} / {user.room}</td>}{activeTab==='teachers'&&<td className="p-3"><span className={`inline-flex px-2 py-1 rounded-full text-xs font-semibold ${user.teacherPasswordSet ? 'bg-green-50 text-green-700' : user.teacherTempHash ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>{user.teacherPasswordSet ? 'ตั้งแล้ว' : user.teacherTempHash ? 'รอตั้งรหัส' : 'ยังไม่เปิดใช้งาน'}</span></td>}<td className="p-3"><div className="flex justify-end gap-1">{activeTab==='teachers'&&<button title={user.teacherPasswordSet ? 'รีเซ็ตรหัสผ่าน' : 'สร้างรหัสตั้งต้น'} onClick={()=>handleTeacherSetupCode(user)} className="p-2 text-green-600 hover:bg-green-50 rounded"><ShieldCheck size={16}/></button>}<button onClick={()=>openModal(user)} className="p-2 text-blue-600 hover:bg-blue-50 rounded"><Edit2 size={16}/></button><button onClick={()=>handleDelete(user.id)} className="p-2 text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div></td></tr>)}{!filteredUsers.length&&<tr><td colSpan={activeTab==='teachers'?4:4} className="p-8 text-center text-gray-400">ยังไม่มีข้อมูล</td></tr>}</tbody></table></Card>
+        <Card className="overflow-x-auto"><table className="w-full text-sm min-w-[720px]"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left p-3">รหัส</th><th className="text-left p-3">ชื่อ-สกุล</th>{activeTab==='students'&&<th className="text-left p-3">ระดับชั้น / ห้อง</th>}{activeTab==='teachers'&&<th className="text-left p-3">รหัสผ่าน</th>}<th className="text-right p-3">จัดการ</th></tr></thead><tbody>{filteredUsers.map(user=><tr key={user.id} className="border-t hover:bg-gray-50"><td className="p-3 font-medium">{user.id}</td><td className="p-3">{user.title}{user.fname} {user.lname}</td>{activeTab==='students'&&<td className="p-3">{user.level} / {user.room}</td>}{activeTab==='teachers'&&<td className="p-3"><span className={`inline-flex px-2 py-1 rounded-full text-xs font-semibold ${user.teacherPasswordSet ? 'bg-green-50 text-green-700' : user.teacherTempHash ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>{user.teacherPasswordSet ? 'ตั้งแล้ว' : user.teacherTempHash ? 'รอตั้งรหัส' : 'ยังไม่เปิดใช้งาน'}</span></td>}<td className="p-3"><div className="flex justify-end gap-1">{activeTab==='teachers'&&<button title={user.teacherPasswordSet ? 'ตั้ง/รีเซ็ตรหัสตั้งต้น' : 'กำหนดรหัสตั้งต้น'} onClick={()=>handleTeacherSetupCode(user)} className="p-2 text-green-600 hover:bg-green-50 rounded"><ShieldCheck size={16}/></button>}<button onClick={()=>openModal(user)} className="p-2 text-blue-600 hover:bg-blue-50 rounded"><Edit2 size={16}/></button><button onClick={()=>handleDelete(user.id)} className="p-2 text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button></div></td></tr>)}{!filteredUsers.length&&<tr><td colSpan={activeTab==='teachers'?4:4} className="p-8 text-center text-gray-400">ยังไม่มีข้อมูล</td></tr>}</tbody></table></Card>
       </div>}
 
       {activeTab === 'catalogs' && <div className="grid md:grid-cols-2 gap-6">
@@ -460,22 +518,20 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
           <div className="grid grid-cols-3 gap-3"><Select label="คำนำหน้า" value={formData.title} onChange={e=>setFormData({...formData,title:e.target.value})} options={['นาย','นางสาว','นาง','อาจารย์','ดร.','ผศ.','รศ.']}/><div className="col-span-2"><Input label="ชื่อ" value={formData.fname} onChange={e=>setFormData({...formData,fname:e.target.value})}/></div></div>
           <Input label="นามสกุล" value={formData.lname} onChange={e=>setFormData({...formData,lname:e.target.value})}/>
           {activeTab==='students'&&<div className="grid grid-cols-2 gap-3"><Select label="ระดับชั้น" value={formData.level} onChange={e=>setFormData({...formData,level:e.target.value})} options={LEVELS}/><Select label="ห้อง" value={formData.room} onChange={e=>setFormData({...formData,room:e.target.value})} options={ROOMS}/></div>}
+          {activeTab==='teachers'&&!editingUser&&<div className="space-y-2"><Input label="รหัสตั้งต้น" type="text" value={formData.initialPassword || ''} onChange={e=>setFormData({...formData,initialPassword:e.target.value})} placeholder="ค่าเริ่มต้น 123456"/><p className="text-xs text-gray-500">ค่าเริ่มต้นคือ 123456 อาจารย์จะใช้รหัสนี้เข้าสู่ระบบครั้งแรก แล้วระบบจะให้ตั้งรหัสผ่านส่วนตัวทันที</p></div>}
           <div className="flex justify-end gap-2 pt-3"><Button variant="secondary" onClick={()=>setIsModalOpen(false)}>ยกเลิก</Button><Button onClick={handleSave}>บันทึก</Button></div>
         </div>
       </Modal>
 
-      <Modal isOpen={setupCodeDialog.isOpen} onClose={()=>setSetupCodeDialog({isOpen:false,code:'',teacherName:''})} title="รหัสตั้งต้นสำหรับอาจารย์">
+      <Modal isOpen={setupCodeDialog.isOpen} onClose={()=>setSetupCodeDialog({isOpen:false,code:'123456',teacher:null,teacherName:''})} title="ตั้ง/รีเซ็ตรหัสตั้งต้นอาจารย์">
         <div className="space-y-5">
           <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
-            <p className="text-sm text-gray-600">ส่งรหัสนี้ให้อาจารย์ <b>{setupCodeDialog.teacherName}</b> โดยตรง ระบบจะให้อาจารย์ตั้งรหัสผ่านส่วนตัวใหม่ทันทีหลังยืนยันรหัสตั้งต้น</p>
+            <p className="text-sm text-gray-600">กำหนดรหัสตั้งต้นให้อาจารย์ <b>{setupCodeDialog.teacherName}</b> ค่าเริ่มต้นคือ <b>123456</b> เมื่ออาจารย์ใช้รหัสนี้เข้าสู่ระบบ ระบบจะให้ตั้งรหัสผ่านส่วนตัวใหม่ทันที</p>
           </div>
-          <div className="text-center">
-            <p className="text-xs text-gray-500 mb-2">รหัสตั้งต้น 6 หลัก</p>
-            <div className="text-4xl font-bold tracking-[0.25em] text-blue-700 bg-gray-50 border rounded-xl py-5">{setupCodeDialog.code}</div>
-          </div>
+          <Input label="รหัสตั้งต้น" type="text" value={setupCodeDialog.code} onChange={e=>setSetupCodeDialog(prev=>({...prev,code:e.target.value}))} placeholder="123456"/>
           <div className="flex gap-2 justify-end">
-            <Button variant="secondary" onClick={async()=>{ try { await navigator.clipboard.writeText(setupCodeDialog.code); showToast('คัดลอกรหัสตั้งต้นแล้ว'); } catch (_) { showToast('คัดลอกไม่สำเร็จ กรุณาจดรหัสไว้','error'); } }}><Copy size={16}/> คัดลอก</Button>
-            <Button onClick={()=>setSetupCodeDialog({isOpen:false,code:'',teacherName:''})}>เสร็จสิ้น</Button>
+            <Button variant="secondary" onClick={()=>setSetupCodeDialog({isOpen:false,code:'123456',teacher:null,teacherName:''})}>ยกเลิก</Button>
+            <Button onClick={()=>setupCodeDialog.teacher && issueTeacherSetupCode(setupCodeDialog.teacher, setupCodeDialog.code)}><ShieldCheck size={16}/> บันทึกรหัสตั้งต้น</Button>
           </div>
         </div>
       </Modal>
