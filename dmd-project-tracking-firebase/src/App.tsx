@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { signInAnonymously, signOut } from 'firebase/auth';
+import { signInAnonymously } from 'firebase/auth';
 import { collection, doc, getDoc, getDocs, onSnapshot, setDoc, writeBatch } from 'firebase/firestore';
-import { auth, authReady, db as firestore } from './firebase';
+import { auth, db as firestore } from './firebase';
 import { 
   Users, UserCircle, LogOut, Search, Plus, Trash2, Edit2, 
   CheckCircle, Clock, Link as LinkIcon, BarChart3, Settings, 
@@ -12,7 +12,7 @@ import {
 const DEFAULT_LEVELS = ['ปวช. 1', 'ปวช. 2', 'ปวช. 3', 'ปวส. 1', 'ปวส. 2'];
 const DEFAULT_ROOMS = ['1', '2', '3', '4'];
 const ADMIN_PASSWORD = '995622';
-const APP_VERSION = '8.0.0';
+const APP_VERSION = '8.0.1';
 const DB_SCHEMA_VERSION = 8;
 const ACTIVE_COLLECTIONS = ['users', 'groups', 'templates', 'submissions'];
 const LEGACY_COLLECTIONS = ['loginIndex', 'authProfiles', 'sessions', 'publicStudents', 'publicProjects', 'publicStats', 'auditLogs'];
@@ -1552,14 +1552,14 @@ export default function App() {
     return snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
   };
 
+  const withTimeout = (promise, ms, label) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} ใช้เวลานานเกินไป`)), ms))
+  ]);
+
   const ensureAnonymousSession = async () => {
-    await authReady;
-    if (typeof auth.authStateReady === 'function') await auth.authStateReady();
     if (auth.currentUser?.isAnonymous) return auth.currentUser;
-    if (auth.currentUser) {
-      try { await signOut(auth); } catch (_) {}
-    }
-    const cred = await signInAnonymously(auth);
+    const cred = await withTimeout(signInAnonymously(auth), 10000, 'การเชื่อมต่อระบบ');
     return cred.user;
   };
 
@@ -1667,8 +1667,8 @@ export default function App() {
       try {
         setLoading(true);
         await ensureAnonymousSession();
-        await ensureBaseData();
-        const nextDb = await loadAllData();
+        await withTimeout(ensureBaseData(), 15000, 'การเตรียมฐานข้อมูล');
+        const nextDb = await withTimeout(loadAllData(), 20000, 'การโหลดข้อมูล');
         if (!cancelled) {
           restoreWebSession(nextDb);
           subscribeRealtime();
