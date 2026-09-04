@@ -6,13 +6,13 @@ import {
   Users, UserCircle, LogOut, Search, Plus, Trash2, Edit2, 
   CheckCircle, Clock, Link as LinkIcon, BarChart3, Settings, 
   ChevronRight, AlertCircle, Check, X, XCircle, Download, Upload, Bookmark, Copy,
-  Loader2, Info, GraduationCap, School, LayoutDashboard, FolderKanban, ShieldCheck
+  Loader2, Info, GraduationCap, School, LayoutDashboard, FolderKanban, ShieldCheck, Printer
 } from 'lucide-react';
 
 const DEFAULT_LEVELS = ['ปวช. 1', 'ปวช. 2', 'ปวช. 3', 'ปวส. 1', 'ปวส. 2'];
 const DEFAULT_ROOMS = ['1', '2', '3', '4'];
 const ADMIN_PASSWORD = '995622';
-const APP_VERSION = '8.0.6';
+const APP_VERSION = '8.0.9';
 const DB_SCHEMA_VERSION = 8;
 const ACTIVE_COLLECTIONS = ['users', 'groups', 'templates', 'submissions'];
 const LEGACY_COLLECTIONS = ['loginIndex', 'authProfiles', 'sessions', 'publicStudents', 'publicProjects', 'publicStats', 'auditLogs'];
@@ -102,6 +102,96 @@ const formatThaiDate = (value) => {
     month: 'short',
     year: 'numeric'
   }).format(d);
+};
+
+const formatThaiDateTime = (value = new Date()) => {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return '-';
+  return new Intl.DateTimeFormat('th-TH', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(d);
+};
+
+const escapeHtml = (value) => String(value ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#039;');
+
+const milestoneStatusLabel = (status) => status === 'approved' ? 'อนุมัติ' : status === 'rejected' ? 'ไม่อนุมัติ' : 'รอตรวจ';
+
+const openPrintableReport = (title, bodyHtml, options = {}) => {
+  const landscape = options.landscape === true;
+  const win = window.open('', '_blank', 'width=1100,height=850');
+  if (!win) return false;
+  const safeTitle = escapeHtml(title);
+  win.document.open();
+  win.document.write(`<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<title>${safeTitle}</title>
+<style>
+  @page { size: A4 ${landscape ? 'landscape' : 'portrait'}; margin: 14mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Tahoma", "Noto Sans Thai", Arial, sans-serif; color:#111827; margin:0; font-size:12px; line-height:1.55; }
+  h1,h2,h3,p { margin-top:0; }
+  h1 { font-size:20px; margin-bottom:4px; }
+  h2 { font-size:15px; margin:18px 0 8px; padding-bottom:5px; border-bottom:1px solid #d1d5db; }
+  h3 { font-size:13px; margin:12px 0 6px; }
+  .muted { color:#6b7280; }
+  .header { text-align:center; margin-bottom:16px; }
+  .meta { display:flex; justify-content:space-between; gap:12px; margin:10px 0 14px; }
+  .summary { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:12px 0; }
+  .summary > div { border:1px solid #d1d5db; border-radius:8px; padding:9px; }
+  .summary b { display:block; font-size:18px; margin-top:3px; }
+  table { width:100%; border-collapse:collapse; margin:8px 0 14px; }
+  th,td { border:1px solid #d1d5db; padding:6px 7px; vertical-align:top; }
+  th { background:#f3f4f6; text-align:left; }
+  .right { text-align:right; }
+  .center { text-align:center; }
+  .page-break { break-before:page; page-break-before:always; }
+  .avoid { break-inside:avoid; page-break-inside:avoid; }
+  .pill { display:inline-block; padding:2px 6px; border:1px solid #d1d5db; border-radius:999px; margin:1px 2px 1px 0; }
+  .signatures { display:grid; grid-template-columns:1fr 1fr; gap:60px; margin-top:36px; text-align:center; }
+  .signature-line { border-top:1px solid #6b7280; padding-top:6px; margin-top:45px; }
+  @media print { .no-print { display:none !important; } }
+</style>
+</head>
+<body>
+${bodyHtml}
+<script>setTimeout(() => { window.focus(); window.print(); }, 250);<\/script>
+</body>
+</html>`);
+  win.document.close();
+  return true;
+};
+
+const copyTextToClipboard = async (text) => {
+  try {
+    await navigator.clipboard.writeText(String(text));
+    return true;
+  } catch (_) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = String(text);
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
 };
 
 const addDaysToDateInput = (baseValue, days) => {
@@ -508,20 +598,91 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
     return { level, groups: groups.length, students: students.filter(s => normalizeMatchText(s.level) === normalizeMatchText(level)).length, progress: groups.length ? groups.reduce((a,g)=>a+calculateGroupProgress(g.milestones||[]),0)/groups.length : 0 };
   });
 
+  // ลิงก์ถาวรสำหรับผู้ปกครองทั้งแผนก ใช้ URL เดียว ไม่ผูกกับนักศึกษารายบุคคล
+  const parentPortalUrl = `${window.location.origin}${window.location.pathname}?parent=1`;
+
+  const copyParentPortalLink = async () => {
+    const copied = await copyTextToClipboard(parentPortalUrl);
+    showToast(copied ? 'คัดลอกลิงก์ผู้ปกครองแล้ว' : 'ไม่สามารถคัดลอกอัตโนมัติได้ กรุณาคัดลอกจากช่องลิงก์', copied ? 'success' : 'error');
+  };
+
+  const openParentPortal = () => {
+    window.open(parentPortalUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  const printAdminReport = () => {
+    const sortedGroups = [...(db.groups || [])].sort((a, b) => {
+      const levelCompare = getLevelSortIndex(a.level) - getLevelSortIndex(b.level);
+      if (levelCompare !== 0) return levelCompare;
+      const roomCompare = compareRoomValue(a.room, b.room);
+      if (roomCompare !== 0) return roomCompare;
+      return String(a.name || '').localeCompare(String(b.name || ''), 'th', { numeric: true });
+    });
+    const teacherName = teacherId => {
+      const t = teachers.find(x => String(x.id) === String(teacherId));
+      return t ? `${t.title || ''}${t.fname || ''} ${t.lname || ''}`.trim() : String(teacherId || '-');
+    };
+    const studentName = studentId => {
+      const st = students.find(x => String(x.id) === String(studentId));
+      return st ? `${st.title || ''}${st.fname || ''} ${st.lname || ''}`.trim() : String(studentId || '-');
+    };
+    const teacherStats = teachers.map(t => {
+      const groups = sortedGroups.filter(g => String(g.teacherId) === String(t.id));
+      return {
+        teacher: `${t.title || ''}${t.fname || ''} ${t.lname || ''}`.trim(),
+        count: groups.length,
+        progress: groups.length ? groups.reduce((sum, g) => sum + calculateGroupProgress(g.milestones || []), 0) / groups.length : 0
+      };
+    }).sort((a,b)=>a.teacher.localeCompare(b.teacher,'th'));
+
+    const body = `
+      <div class="header">
+        <h1>รายงานสรุประบบติดตามโครงงานบูรณาการ สาขา DMD</h1>
+        <p class="muted">DMD Integrated Project Tracking System • รายงานสำหรับผู้บริหาร</p>
+      </div>
+      <div class="meta"><span>วันที่ออกรายงาน: ${escapeHtml(formatThaiDateTime())}</span><span>เวอร์ชันระบบ: v${escapeHtml(APP_VERSION)}</span></div>
+      <div class="summary">
+        <div>นักศึกษาทั้งหมด<b>${students.length}</b></div>
+        <div>อาจารย์ผู้ควบคุม<b>${teachers.length}</b></div>
+        <div>กลุ่มโครงงาน<b>${sortedGroups.length}</b></div>
+        <div>ความคืบหน้าเฉลี่ย<b>${avgProgress.toFixed(0)}%</b></div>
+      </div>
+      <h2>สรุปแยกตามระดับชั้น</h2>
+      <table><thead><tr><th>ระดับชั้น</th><th class="right">นักศึกษา</th><th class="right">กลุ่ม</th><th class="right">ความคืบหน้าเฉลี่ย</th></tr></thead><tbody>
+        ${levelStats.map(x => `<tr><td>${escapeHtml(x.level)}</td><td class="right">${x.students}</td><td class="right">${x.groups}</td><td class="right">${x.progress.toFixed(0)}%</td></tr>`).join('')}
+      </tbody></table>
+      <h2>สรุปตามอาจารย์ผู้ควบคุม</h2>
+      <table><thead><tr><th>อาจารย์ผู้ควบคุม</th><th class="right">จำนวนกลุ่ม</th><th class="right">ความคืบหน้าเฉลี่ย</th></tr></thead><tbody>
+        ${teacherStats.map(x => `<tr><td>${escapeHtml(x.teacher)}</td><td class="right">${x.count}</td><td class="right">${x.progress.toFixed(0)}%</td></tr>`).join('')}
+      </tbody></table>
+      <h2>รายละเอียดกลุ่มโครงงานทั้งหมด</h2>
+      <table><thead><tr><th style="width:4%">ลำดับ</th><th style="width:27%">ชื่อกลุ่มโครงงาน</th><th style="width:12%">ระดับ/ห้อง</th><th style="width:20%">อาจารย์ผู้ควบคุม</th><th>สมาชิก</th><th class="right" style="width:9%">ความคืบหน้า</th></tr></thead><tbody>
+        ${sortedGroups.map((g, i) => `<tr><td class="center">${i+1}</td><td>${escapeHtml(g.name)}</td><td>${escapeHtml(g.level)} / ${escapeHtml(g.room)}</td><td>${escapeHtml(teacherName(g.teacherId))}</td><td>${(g.members || []).map(studentName).map(escapeHtml).join(', ') || '-'}</td><td class="right">${calculateGroupProgress(g.milestones || []).toFixed(0)}%</td></tr>`).join('')}
+      </tbody></table>
+      <div class="signatures"><div><div class="signature-line">ผู้จัดทำรายงาน</div></div><div><div class="signature-line">ผู้บริหาร/ผู้ตรวจสอบ</div></div></div>
+    `;
+    const ok = openPrintableReport('รายงานสรุปโครงงานบูรณาการ DMD', body, { landscape: true });
+    if (!ok) showToast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์ กรุณาอนุญาต Pop-up', 'error');
+  };
+
   const tabs = [
     ['dashboard', <LayoutDashboard size={16}/>, 'ภาพรวม'],
     ['students', <GraduationCap size={16}/>, 'นักศึกษา'],
     ['teachers', <School size={16}/>, 'อาจารย์ผู้ควบคุม'],
     ['catalogs', <Settings size={16}/>, 'คลังระดับชั้น/ห้อง'],
     ['projects', <FolderKanban size={16}/>, 'จัดการโครงงาน'],
+    ['parentLinks', <LinkIcon size={16}/>, 'ลิงก์ผู้ปกครอง'],
     ['system', <ShieldCheck size={16}/>, 'ระบบ/ฐานข้อมูล']
   ];
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold text-gray-800">ผู้จัดการระบบ (Admin)</h2>
-        <p className="text-sm text-gray-500 mt-1">ควบคุมข้อมูลผู้ใช้ โครงงาน คลังระดับชั้น/ห้อง และสถิติทั้งหมด</p>
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800">ผู้จัดการระบบ (Admin)</h2>
+          <p className="text-sm text-gray-500 mt-1">ควบคุมข้อมูลผู้ใช้ โครงงาน คลังระดับชั้น/ห้อง และสถิติทั้งหมด</p>
+        </div>
+        <Button variant="secondary" onClick={printAdminReport}><Printer size={16}/> พิมพ์รายงานรวม</Button>
       </div>
 
       <div className="flex gap-2 overflow-x-auto pb-1 border-b border-gray-200">
@@ -555,6 +716,33 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
       </div>}
 
       {activeTab === 'projects' && <TeacherView user={currentUser} db={db} handleUpdate={handleUpdate} showToast={showToast} askConfirm={askConfirm} askPrompt={askPrompt} adminMode />}
+
+      {activeTab === 'parentLinks' && <div className="max-w-3xl mx-auto space-y-5">
+        <div className="text-center">
+          <h3 className="text-xl font-bold text-gray-800">ลิงก์ถาวรสำหรับผู้ปกครอง</h3>
+          <p className="text-sm text-gray-500 mt-1">ใช้ลิงก์เดียวสำหรับผู้ปกครองทั้งแผนก ส่งครั้งเดียวและใช้งานต่อเนื่องได้ ไม่ต้องสร้างลิงก์ใหม่รายบุคคล</p>
+        </div>
+        <Card>
+          <div className="max-w-2xl mx-auto space-y-5 text-center">
+            <div className="mx-auto w-14 h-14 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center"><Users size={28}/></div>
+            <div>
+              <h4 className="font-bold text-gray-800 text-lg">ศูนย์ตรวจสอบโครงงานสำหรับผู้ปกครอง</h4>
+              <p className="text-sm text-gray-500 mt-1">เมื่อเปิดลิงก์นี้ ผู้ปกครองจะเห็นเฉพาะหน้าค้นหานักศึกษาและข้อมูลติดตามโครงงานเท่านั้น ไม่เห็นเมนูนักศึกษา อาจารย์ หรือ Admin</p>
+            </div>
+            <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-left">
+              <p className="text-xs text-gray-400 mb-1">ลิงก์ถาวร</p>
+              <p className="text-sm text-blue-700 break-all font-medium">{parentPortalUrl}</p>
+            </div>
+            <div className="flex flex-col sm:flex-row justify-center gap-2">
+              <Button onClick={copyParentPortalLink}><Copy size={16}/> คัดลอกลิงก์</Button>
+              <Button variant="secondary" onClick={openParentPortal}><LinkIcon size={16}/> เปิดหน้าผู้ปกครอง</Button>
+            </div>
+            <div className="rounded-xl bg-blue-50 border border-blue-100 p-4 text-sm text-blue-800 text-left">
+              <b>วิธีใช้:</b> ส่งลิงก์นี้ให้ผู้ปกครองทุกคน ผู้ปกครองกรอกรหัส ชื่อ หรือนามสกุลของนักศึกษา แล้วเลือกชื่อเพื่อดูความคืบหน้าได้ทันที ลิงก์ไม่เปลี่ยนและไม่หมดอายุจากระบบ
+            </div>
+          </div>
+        </Card>
+      </div>}
 
       {activeTab === 'system' && <div className="space-y-6">
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -789,7 +977,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
 
   const handleSaveGroup = async () => {
     if(!groupForm.name) return showToast('กรุณากรอกชื่อกลุ่ม', 'error');
-    if(groupForm.members.length > 6) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 6 คน', 'error');
+    if(groupForm.members.length > 10) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 10 คน', 'error');
     if(adminMode && !groupForm.teacherId) return showToast('กรุณาเลือกอาจารย์ผู้ควบคุม', 'error');
 
     const selectedStudents = (groupForm.members || []).map(id => getStudentRecord(id)).filter(Boolean);
@@ -1011,12 +1199,60 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     showToast('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว');
   };
 
+  const printTeacherReport = () => {
+    const reportGroups = [...ownedGroups].sort((a, b) => {
+      const levelCompare = getLevelSortIndex(a.level) - getLevelSortIndex(b.level);
+      if (levelCompare !== 0) return levelCompare;
+      const roomCompare = compareRoomValue(a.room, b.room);
+      if (roomCompare !== 0) return roomCompare;
+      return String(a.name || '').localeCompare(String(b.name || ''), 'th', { numeric: true });
+    });
+    const teacherLabel = `${user.title || ''}${user.fname || ''} ${user.lname || ''}`.trim();
+    const avg = reportGroups.length ? reportGroups.reduce((sum, g) => sum + calculateGroupProgress(g.milestones || []), 0) / reportGroups.length : 0;
+    const details = reportGroups.map((g, gi) => {
+      const members = (g.members || []).map(id => {
+        const st = getStudentRecord(id);
+        return st ? `${st.title || ''}${st.fname || ''} ${st.lname || ''} (${st.id}, ห้อง ${st.room || '-'})` : String(id);
+      });
+      const submissions = (db.submissions || []).filter(s => String(s.groupId) === String(g.id));
+      return `
+        <div class="avoid">
+          <h2>${gi + 1}. ${escapeHtml(g.name || '-')}</h2>
+          <p><b>ระดับชั้น/ห้อง:</b> ${escapeHtml(g.level || '-')} / ${escapeHtml(getGroupRoomLabel(g))} &nbsp; <b>สมาชิก:</b> ${members.length} คน &nbsp; <b>ความคืบหน้า:</b> ${calculateGroupProgress(g.milestones || []).toFixed(0)}%</p>
+          <p><b>รายชื่อสมาชิก:</b> ${members.map(escapeHtml).join(', ') || '-'}</p>
+          <table><thead><tr><th style="width:5%">#</th><th>รายการประเมิน</th><th style="width:10%">น้ำหนัก</th><th style="width:13%">วันที่สั่ง</th><th style="width:13%">กำหนดส่ง</th><th style="width:12%">สถานะ</th></tr></thead><tbody>
+            ${(g.milestones || []).map((m, i) => `<tr><td class="center">${i+1}</td><td>${escapeHtml(m.desc || '-')}</td><td class="right">${Number(m.percent || 0)}%</td><td>${escapeHtml(formatThaiDate(m.assignDate))}</td><td>${escapeHtml(formatThaiDate(m.dueDate))}</td><td>${escapeHtml(milestoneStatusLabel(m.status))}</td></tr>`).join('') || '<tr><td colspan="6" class="center muted">ยังไม่มีรายการประเมิน</td></tr>'}
+          </tbody></table>
+          <p class="muted">ลิงก์งานที่ส่งเข้าระบบ: ${submissions.length} รายการ</p>
+        </div>`;
+    }).join('');
+
+    const body = `
+      <div class="header">
+        <h1>รายงานติดตามโครงงานบูรณาการ สาขา DMD</h1>
+        <p class="muted">รายงานประจำอาจารย์ผู้ควบคุม</p>
+      </div>
+      <div class="meta"><span>อาจารย์ผู้ควบคุม: <b>${escapeHtml(teacherLabel || '-')}</b></span><span>วันที่ออกรายงาน: ${escapeHtml(formatThaiDateTime())}</span></div>
+      <div class="summary">
+        <div>กลุ่มโครงงานทั้งหมด<b>${reportGroups.length}</b></div>
+        <div>ความคืบหน้าเฉลี่ย<b>${avg.toFixed(0)}%</b></div>
+        <div>รายการผ่านอนุมัติ<b>${reportGroups.reduce((sum,g)=>sum+(g.milestones||[]).filter(m=>m.status==='approved').length,0)}</b></div>
+        <div>รายการไม่อนุมัติ<b>${reportGroups.reduce((sum,g)=>sum+(g.milestones||[]).filter(m=>m.status==='rejected').length,0)}</b></div>
+      </div>
+      ${details || '<p class="center muted">ยังไม่มีกลุ่มโครงงาน</p>'}
+      <div class="signatures"><div><div class="signature-line">อาจารย์ผู้ควบคุม</div></div><div><div class="signature-line">ผู้ตรวจสอบ/หัวหน้าสาขา</div></div></div>
+    `;
+    const ok = openPrintableReport(`รายงานโครงงาน - ${teacherLabel}`, body);
+    if (!ok) showToast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์ กรุณาอนุญาต Pop-up', 'error');
+  };
+
   return (
     <div className="space-y-6 flex flex-col md:flex-row gap-6">
       <div className="w-full md:w-1/3 flex flex-col gap-4">
         <div className="flex justify-between items-center gap-2">
           <h2 className="text-xl font-bold text-gray-800">{adminMode ? 'กลุ่มโครงงานทั้งหมด' : 'กลุ่มโครงงานของฉัน'}</h2>
           <div className="flex gap-2 flex-wrap justify-end">
+            {!adminMode && <Button variant="secondary" onClick={printTeacherReport} className="py-1.5 px-3 text-sm"><Printer size={16}/> พิมพ์รายงาน</Button>}
             {!adminMode && <Button variant="secondary" onClick={()=>setIsPasswordModalOpen(true)} className="py-1.5 px-3 text-sm"><ShieldCheck size={16}/> รหัสผ่าน</Button>}
             {!adminMode && <Button variant="secondary" onClick={() => { setGroupTemplateTeacherFilter('all'); setIsGroupTemplateModalOpen(true); }} className="py-1.5 px-3 text-sm"><Copy size={16}/> คัดลอกกลุ่ม</Button>}
             <Button onClick={() => { setGroupForm({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], allowCrossRoom: false, members: [], milestones: [], links: [], copiedFromGroupId: '', copiedFromTeacherId: '' }); setIsGroupModalOpen(true); }} className="py-1.5 px-3 text-sm"><Plus size={16}/> สร้าง</Button>
@@ -1306,7 +1542,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
             </Button>
           </div>
           <div className="pt-2 border-t border-gray-100">
-             <div className="flex justify-between items-center mb-2"><p className="text-sm font-medium">เลือกนักศึกษาเข้ากลุ่ม</p><span className={`text-xs font-semibold ${groupForm.members.length>=6?'text-red-500':'text-gray-400'}`}>{groupForm.members.length}/6 คน</span></div>
+             <div className="flex justify-between items-center mb-2"><p className="text-sm font-medium">เลือกนักศึกษาเข้ากลุ่ม</p><span className={`text-xs font-semibold ${groupForm.members.length>=10?'text-red-500':'text-gray-400'}`}>{groupForm.members.length}/10 คน</span></div>
              <div className="flex flex-wrap gap-2 mb-3">
               {groupForm.members.map(mid => (
                 <div key={mid} className="bg-blue-50 border border-blue-200 text-blue-800 text-xs px-2 py-1 rounded-md flex items-center gap-1">
@@ -1331,7 +1567,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
                   const haystack = normalize(`${u.id} ${u.title || ''} ${u.fname || ''} ${u.lname || ''}`);
                   return u.role === 'student' && sameLevel && roomAllowed && !groupForm.members.some(mid => String(mid) === String(u.id)) && haystack.includes(q);
                 }).map(student => (
-                  <div key={student.id} onClick={() => { if(groupForm.members.length>=6) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 6 คน','error'); setGroupForm(p => ({...p, members: [...p.members, String(student.id)]})); setSearchStudent(''); }} className="px-4 py-2 hover:bg-gray-50 cursor-pointer text-sm">
+                  <div key={student.id} onClick={() => { if(groupForm.members.length>=10) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 10 คน','error'); setGroupForm(p => ({...p, members: [...p.members, String(student.id)]})); setSearchStudent(''); }} className="px-4 py-2 hover:bg-gray-50 cursor-pointer text-sm">
                     <div className="flex items-center justify-between gap-3">
                       <span>{student.fname} {student.lname} ({student.id})</span>
                       <span className="text-xs text-gray-400 shrink-0">ห้อง {student.room || '-'}</span>
@@ -1446,7 +1682,7 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
               <UserCircle size={16}/> รหัส: {targetStudent.id}  |  ชั้น: {targetStudent.level} ห้อง {targetStudent.room}
             </p>
           </div>
-          {isParent && <span className="bg-white/20 px-3 py-1 rounded-full text-sm font-medium backdrop-blur-sm">โหมดผู้เข้าชม (ผู้ปกครอง)</span>}
+          {isParent && <span className="bg-white/20 px-3 py-1 rounded-full text-sm font-medium backdrop-blur-sm">โหมดผู้ปกครอง (Parent)</span>}
         </div>
       </Card>
 
@@ -1618,6 +1854,84 @@ const ProgressDashboard = ({ db, targetStudent, isParent = false, handleUpdate, 
   );
 };
 
+const ParentShareView = ({ db, targetStudent, onBack = null }) => {
+  if (!targetStudent) return null;
+  const groups = (db.groups || [])
+    .filter(g => (g.members || []).some(id => String(id) === String(targetStudent.id)))
+    .sort((a, b) => {
+      const levelCompare = getLevelSortIndex(a.level) - getLevelSortIndex(b.level);
+      if (levelCompare !== 0) return levelCompare;
+      const roomCompare = compareRoomValue(a.room, b.room);
+      if (roomCompare !== 0) return roomCompare;
+      return String(a.name || '').localeCompare(String(b.name || ''), 'th', { numeric: true });
+    });
+  const overall = groups.length ? groups.reduce((sum, g) => sum + calculateGroupProgress(g.milestones || []), 0) / groups.length : 0;
+  const teacherName = id => {
+    const t = (db.users || []).find(u => u.role === 'teacher' && String(u.id) === String(id));
+    return t ? `${t.title || ''}${t.fname || ''} ${t.lname || ''}`.trim() : 'ไม่ระบุ';
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-100 px-4 py-8 sm:py-12">
+      <div className="max-w-4xl mx-auto">
+        <div className="bg-white border border-gray-200 rounded-3xl shadow-sm overflow-hidden">
+          <div className="bg-gradient-to-r from-blue-600 to-indigo-700 text-white px-6 sm:px-8 py-7">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <p className="text-blue-100 text-sm">DMD Integrated Project Tracking System</p>
+                <h1 className="text-2xl font-bold mt-1">ข้อมูลติดตามโครงงานสำหรับผู้ปกครอง</h1>
+              </div>
+              <div className="flex items-center gap-2">
+                {onBack && <button type="button" onClick={onBack} className="bg-white/15 hover:bg-white/25 border border-white/20 rounded-xl px-3 py-2 text-sm transition">ค้นหานักศึกษาคนอื่น</button>}
+                <div className="bg-white/15 border border-white/20 rounded-xl px-3 py-2 text-sm">อ่านข้อมูลอย่างเดียว</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-6 sm:p-8 space-y-7">
+            <section className="border-b border-gray-100 pb-6">
+              <h2 className="text-xl font-bold text-gray-900">{targetStudent.title || ''}{targetStudent.fname || ''} {targetStudent.lname || ''}</h2>
+              <p className="text-sm text-gray-500 mt-1">รหัสนักศึกษา {targetStudent.id} • {targetStudent.level || '-'} / ห้อง {targetStudent.room || '-'}</p>
+              <div className="mt-5 max-w-xl"><ProgressBar percent={overall}/></div>
+              <p className="text-xs text-gray-400 mt-2">สรุปจากกลุ่มโครงงานที่นักศึกษามีชื่ออยู่ทั้งหมด {groups.length} กลุ่ม</p>
+            </section>
+
+            <section className="space-y-4">
+              <h3 className="font-bold text-gray-800 text-lg">รายละเอียดโครงงาน</h3>
+              {groups.map(group => {
+                const progress = calculateGroupProgress(group.milestones || []);
+                const nearest = getNearestDeadlineMilestone(group.milestones || []);
+                const deadline = nearest ? getDeadlineInfo(nearest) : null;
+                return <div key={group.id} className="rounded-2xl border border-gray-200 p-5 bg-gray-50/60">
+                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                    <div>
+                      <h4 className="font-bold text-gray-900">{group.name}</h4>
+                      <p className="text-sm text-blue-600 mt-1">อาจารย์ผู้ควบคุม: {teacherName(group.teacherId)}</p>
+                    </div>
+                    <span className="text-lg font-bold text-gray-800">{progress.toFixed(0)}%</span>
+                  </div>
+                  <div className="mt-4"><ProgressBar percent={progress}/></div>
+                  {nearest && deadline && <div className={`mt-4 p-3 rounded-xl border text-sm ${deadline.className}`}><b>{nearest.desc}</b><div className="text-xs mt-1">กำหนดส่ง {formatThaiDate(nearest.dueDate)} • {deadline.text}</div></div>}
+                  <div className="mt-4 space-y-2">
+                    {(group.milestones || []).map(m => <div key={m.id} className="flex items-start justify-between gap-3 text-sm bg-white rounded-xl border border-gray-100 px-3 py-2.5">
+                      <div className="min-w-0"><p className="font-medium text-gray-700">{m.desc || '-'}</p>{m.dueDate && <p className="text-xs text-gray-400 mt-0.5">กำหนดส่ง {formatThaiDate(m.dueDate)}</p>}</div>
+                      <span className={`text-xs font-semibold whitespace-nowrap ${m.status === 'approved' ? 'text-green-600' : m.status === 'rejected' ? 'text-red-600' : 'text-gray-500'}`}>{milestoneStatusLabel(m.status)}</span>
+                    </div>)}
+                    {!(group.milestones || []).length && <p className="text-sm text-gray-400">ยังไม่มีรายการประเมิน</p>}
+                  </div>
+                </div>;
+              })}
+              {!groups.length && <div className="text-center py-10 text-gray-400">ยังไม่มีกลุ่มโครงงานของนักศึกษาคนนี้</div>}
+            </section>
+
+            <div className="pt-2 border-t border-gray-100 text-center text-xs text-gray-400">ระบบสำหรับผู้ปกครองติดตามความคืบหน้าของนักศึกษาโดยตรง</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export default function App() {
   const [db, setDb] = useState({ users: [], groups: [], templates: [], submissions: [], catalogs: { levels: DEFAULT_LEVELS, rooms: DEFAULT_ROOMS } });
   const [loading, setLoading] = useState(true);
@@ -1627,6 +1941,8 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [parentSelectedStudentId, setParentSelectedStudentId] = useState('');
+  const [parentPortalMode] = useState(() => new URLSearchParams(window.location.search).get('parent') === '1');
+  const [usersLoaded, setUsersLoaded] = useState(false);
   const [pendingTeacherSetup, setPendingTeacherSetup] = useState(null);
   const [firstPassword, setFirstPassword] = useState('');
   const [confirmFirstPassword, setConfirmFirstPassword] = useState('');
@@ -1813,7 +2129,8 @@ export default function App() {
       onSnapshot(collection(firestore, 'users'), snap => {
         const rows = snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
         setDb(prev => ({ ...prev, users: normalizeUsersData(rows) }));
-      }, onError),
+        setUsersLoaded(true);
+      }, err => { setUsersLoaded(true); onError(err); }),
       onSnapshot(collection(firestore, 'groups'), snap => {
         const rows = snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
         setDb(prev => ({ ...prev, groups: normalizeGroupsData(rows) }));
@@ -1884,6 +2201,8 @@ export default function App() {
 
   useEffect(() => { dbRef.current = db; }, [db]);
 
+
+
   const syncUsers = async (nextUsers, options = {}) => {
     const forceCanonicalize = options.forceCanonicalize === true;
     const liveDb = dbRef.current;
@@ -1952,7 +2271,7 @@ export default function App() {
       const profile = u.role === 'student' ? {
         ...base,
         level: String(merged.level || ''),
-        room: String(merged.room || '')
+        room: String(merged.room || ''),
       } : {
         ...base,
         teacherPasswordSet: merged.teacherPasswordSet === true,
@@ -2216,7 +2535,9 @@ export default function App() {
         updatedAt:Date.now(), schemaVersion:DB_SCHEMA_VERSION
       };
       const profile = roleName === 'student' ? {
-        ...base, level:canonicalFromList(merged.level, cleanupLevels, cleanupLevels[0] || ''), room:canonicalFromList(merged.room, cleanupRooms, cleanupRooms[0] || '')
+        ...base,
+        level:canonicalFromList(merged.level, cleanupLevels, cleanupLevels[0] || ''),
+        room:canonicalFromList(merged.room, cleanupRooms, cleanupRooms[0] || ''),
       } : roleName === 'teacher' ? {
         ...base,
         teacherPasswordSet: merged.teacherPasswordSet === true,
@@ -2470,6 +2791,83 @@ export default function App() {
     return <div className="min-h-screen bg-gray-50 flex flex-col justify-center items-center p-4"><Loader2 className="animate-spin text-blue-600 mb-4" size={48}/><h2 className="text-xl font-semibold text-gray-700">DMD Integrated Project Tracking System</h2><p className="text-sm text-gray-500 mt-2">โปรดรอสักครู่</p><p className="text-[11px] text-gray-400 mt-1">v{APP_VERSION}</p></div>;
   }
 
+  if (parentPortalMode) {
+    const portalStudent = role === 'parent' ? currentUser : null;
+    if (portalStudent) {
+      return <ParentShareView db={db} targetStudent={portalStudent} onBack={() => {
+        sessionStorage.removeItem('dmd_web_session');
+        setCurrentUser(null);
+        setRole(null);
+        setSearchQuery('');
+        setParentSelectedStudentId('');
+      }}/>;
+    }
+
+    const openSelectedParentStudent = () => {
+      const selected = parentSelectedStudentId
+        ? db.users.find(u => u.role === 'student' && String(u.id) === String(parentSelectedStudentId))
+        : null;
+      const q = normalizeMatchText(searchQuery);
+      const matches = q ? db.users.filter(u => {
+        if (u.role !== 'student') return false;
+        return normalizeMatchText(`${u.id || ''}${u.title || ''}${u.fname || ''}${u.lname || ''}`).includes(q);
+      }) : [];
+      const exactId = matches.find(u => normalizeMatchText(u.id) === q);
+      const student = selected || exactId || (matches.length === 1 ? matches[0] : null);
+      if (!q && !selected) return showToast('กรุณากรอกรหัส ชื่อ หรือนามสกุลนักศึกษา', 'error');
+      if (!matches.length && !selected) return showToast('ไม่พบข้อมูลนักศึกษาที่ค้นหา', 'error');
+      if (!student && matches.length > 1) return showToast('พบรายชื่อมากกว่า 1 คน กรุณาเลือกนักศึกษาจากรายการ', 'error');
+      setRole('parent');
+      setCurrentUser(student);
+    };
+
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4 font-sans text-gray-800">
+        <div className="w-full max-w-lg bg-white rounded-3xl shadow-xl overflow-hidden border border-gray-100">
+          <div className="bg-gradient-to-r from-blue-600 to-indigo-700 p-7 sm:p-8 text-center text-white">
+            <div className="w-14 h-14 mx-auto rounded-2xl bg-white/15 border border-white/20 flex items-center justify-center mb-4"><Search size={27}/></div>
+            <h1 className="text-2xl font-bold">ตรวจสอบโครงงานสำหรับผู้ปกครอง</h1>
+            <p className="text-blue-100 mt-2 text-sm">DMD Integrated Project Tracking System</p>
+          </div>
+          <div className="p-6 sm:p-8 space-y-4">
+            <div className="text-center mb-2">
+              <h2 className="font-semibold text-gray-800">ค้นหาข้อมูลนักศึกษา</h2>
+              <p className="text-xs text-gray-400 mt-1">ค้นหาได้ด้วยรหัสนักศึกษา ชื่อ หรือนามสกุล</p>
+            </div>
+            <Input
+              label="รหัส / ชื่อ / นามสกุลนักศึกษา"
+              placeholder="เช่น 032151 หรือ สมชาย"
+              value={searchQuery}
+              onChange={e => { setSearchQuery(e.target.value); setParentSelectedStudentId(''); }}
+            />
+            {searchQuery.trim() && (
+              <div className="border border-gray-200 rounded-xl overflow-hidden max-h-64 overflow-y-auto bg-white">
+                {parentSearchResults.length > 0 ? parentSearchResults.map(student => {
+                  const selected = String(parentSelectedStudentId) === String(student.id);
+                  return <button
+                    type="button"
+                    key={student.id}
+                    onClick={() => { setParentSelectedStudentId(String(student.id)); setSearchQuery(`${student.fname || ''} ${student.lname || ''}`.trim()); }}
+                    className={`w-full text-left px-4 py-3 border-b last:border-b-0 hover:bg-blue-50 transition ${selected ? 'bg-blue-50 ring-1 ring-inset ring-blue-200' : ''}`}
+                  >
+                    <div className="flex justify-between gap-3">
+                      <div><p className="font-semibold text-sm text-gray-800">{student.title || ''}{student.fname || ''} {student.lname || ''}</p><p className="text-xs text-gray-500 mt-0.5">รหัส {student.id} • {student.level || '-'} / ห้อง {student.room || '-'}</p></div>
+                      {selected && <CheckCircle size={18} className="text-blue-600 shrink-0 mt-0.5"/>}
+                    </div>
+                  </button>;
+                }) : <div className="px-4 py-4 text-sm text-gray-400 text-center">ไม่พบรายชื่อนักศึกษาที่ตรงกับคำค้น</div>}
+              </div>
+            )}
+            <Button type="button" onClick={openSelectedParentStudent} className="w-full py-3"><Search size={17}/> ตรวจสอบความคืบหน้า</Button>
+            <div className="pt-4 border-t text-center text-xs text-gray-400">สำหรับผู้ปกครอง • อ่านข้อมูลอย่างเดียว</div>
+          </div>
+        </div>
+        {toast && <div className="fixed top-4 right-4 z-50"><div className={`px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 text-white font-medium ${toast.type === 'error' ? 'bg-red-500' : 'bg-gray-800'}`}>{toast.type === 'error' ? <AlertCircle size={20}/> : <CheckCircle size={20}/>} {toast.msg}</div></div>}
+      </div>
+    );
+  }
+
+
   if (!role || !currentUser) {
     return (
       <div className="min-h-screen bg-gray-50 flex flex-col justify-center items-center p-4 font-sans text-gray-800">
@@ -2481,12 +2879,12 @@ export default function App() {
                 <h2 className="text-center font-medium text-gray-500 mb-6">เลือกสถานะเพื่อเข้าใช้งาน</h2>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('student')}><UserCircle className="text-blue-500"/> นักศึกษา (Student)</Button>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('teacher')}><CheckCircle className="text-green-500"/> อาจารย์ผู้ควบคุม (Teacher)</Button>
-                <Button variant="secondary" className="w-full justify-start py-3" onClick={() => { setRole('parent'); setSearchQuery(''); setParentSelectedStudentId(''); }}><Search className="text-amber-500"/> ผู้เข้าชม (Parent)</Button>
+                <Button variant="secondary" className="w-full justify-start py-3" onClick={() => { setRole('parent'); setSearchQuery(''); setParentSelectedStudentId(''); }}><Search className="text-amber-500"/> ผู้ปกครอง (Parent)</Button>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('admin')}><Settings className="text-gray-500"/> ผู้จัดการระบบ (Admin)</Button>
               </div>
             ) : (
               <form onSubmit={handleLogin} className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <div className="flex items-center gap-2 text-blue-600 font-semibold mb-2"><button type="button" onClick={() => { setRole(null); setParentSelectedStudentId(''); setSearchQuery(''); }} className="p-1 hover:bg-blue-50 rounded"><ChevronRight className="rotate-180" size={18}/></button>เข้าสู่ระบบในฐานะ {role === 'student' ? 'นักศึกษา' : role === 'teacher' ? 'อาจารย์ผู้ควบคุม' : role === 'admin' ? 'ผู้จัดการระบบ' : 'ผู้เข้าชม'}</div>
+                <div className="flex items-center gap-2 text-blue-600 font-semibold mb-2"><button type="button" onClick={() => { setRole(null); setParentSelectedStudentId(''); setSearchQuery(''); }} className="p-1 hover:bg-blue-50 rounded"><ChevronRight className="rotate-180" size={18}/></button>เข้าสู่ระบบในฐานะ {role === 'student' ? 'นักศึกษา' : role === 'teacher' ? 'อาจารย์ผู้ควบคุม' : role === 'admin' ? 'ผู้จัดการระบบ' : 'ผู้ปกครอง'}</div>
                 {role === 'parent' ? (
                   <div className="space-y-2">
                     <Input
