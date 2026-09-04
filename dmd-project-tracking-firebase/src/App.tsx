@@ -12,7 +12,7 @@ import {
 const DEFAULT_LEVELS = ['ปวช. 1', 'ปวช. 2', 'ปวช. 3', 'ปวส. 1', 'ปวส. 2'];
 const DEFAULT_ROOMS = ['1', '2', '3', '4'];
 const ADMIN_PASSWORD = '995622';
-const APP_VERSION = '8.0.4';
+const APP_VERSION = '8.0.6';
 const DB_SCHEMA_VERSION = 8;
 const ACTIVE_COLLECTIONS = ['users', 'groups', 'templates', 'submissions'];
 const LEGACY_COLLECTIONS = ['loginIndex', 'authProfiles', 'sessions', 'publicStudents', 'publicProjects', 'publicStats', 'auditLogs'];
@@ -56,6 +56,23 @@ const makeEntityId = (prefix) => {
 };
 
 const normalizeMatchText = (value) => String(value ?? '').normalize('NFC').toLowerCase().replace(/[\s.\-_\/]+/g, '');
+
+const STANDARD_LEVEL_ORDER = ['ปวช. 1', 'ปวช. 2', 'ปวช. 3', 'ปวส. 1', 'ปวส. 2'];
+const getLevelSortIndex = (value) => {
+  const normalized = normalizeMatchText(value);
+  const idx = STANDARD_LEVEL_ORDER.findIndex(level => normalizeMatchText(level) === normalized);
+  return idx === -1 ? 999 : idx;
+};
+const compareRoomValue = (a, b) => {
+  const aNum = Number(String(a ?? '').trim());
+  const bNum = Number(String(b ?? '').trim());
+  if (Number.isFinite(aNum) && Number.isFinite(bNum)) return aNum - bNum;
+  return String(a ?? '').localeCompare(String(b ?? ''), 'th', { numeric: true });
+};
+const getGroupMemberSignature = (group) => {
+  const members = [...(group?.members || [])].map(id => String(id)).sort((a, b) => a.localeCompare(b, 'th', { numeric: true }));
+  return `${normalizeMatchText(group?.level)}|${normalizeMatchText(group?.room)}|${members.join(',')}`;
+};
 const canonicalFromList = (value, options = [], fallback = '') => {
   const raw = String(value ?? '').trim();
   const found = (options || []).find(opt => normalizeMatchText(opt) === normalizeMatchText(raw));
@@ -609,7 +626,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   const [templateTeacherFilter, setTemplateTeacherFilter] = useState('all');
   const [isGroupTemplateModalOpen, setIsGroupTemplateModalOpen] = useState(false);
   const [groupTemplateTeacherFilter, setGroupTemplateTeacherFilter] = useState('all');
-  const [groupForm, setGroupForm] = useState({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] });
+  const [groupForm, setGroupForm] = useState({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], allowCrossRoom: false, members: [], milestones: [], links: [] });
   const [searchStudent, setSearchStudent] = useState('');
   const [levelFilter, setLevelFilter] = useState('all');
   const [groupStudentSearch, setGroupStudentSearch] = useState('');
@@ -630,11 +647,19 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
       })
       .map(u => String(u.id))
   );
-  const myGroups = ownedGroups.filter(g => {
-    const matchesLevel = levelFilter === 'all' || normalizeMatchText(g.level) === normalizeMatchText(levelFilter);
-    const matchesStudent = !groupStudentNeedle || (g.members || []).some(mid => matchingStudentIds.has(String(mid)));
-    return matchesLevel && matchesStudent;
-  });
+  const myGroups = ownedGroups
+    .filter(g => {
+      const matchesLevel = levelFilter === 'all' || normalizeMatchText(g.level) === normalizeMatchText(levelFilter);
+      const matchesStudent = !groupStudentNeedle || (g.members || []).some(mid => matchingStudentIds.has(String(mid)));
+      return matchesLevel && matchesStudent;
+    })
+    .sort((a, b) => {
+      const levelCompare = getLevelSortIndex(a.level) - getLevelSortIndex(b.level);
+      if (levelCompare !== 0) return levelCompare;
+      const roomCompare = compareRoomValue(a.room, b.room);
+      if (roomCompare !== 0) return roomCompare;
+      return String(a.name || '').localeCompare(String(b.name || ''), 'th', { numeric: true });
+    });
   const allTemplates = db.templates || [];
   const activeGroup = myGroups.find(g => g.id === activeGroupId);
 
@@ -674,10 +699,30 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     });
 
   // กลุ่มต้นแบบ: ใช้โครงสร้างกลุ่มนักศึกษาของอาจารย์ท่านอื่น
-  // คัดลอกเฉพาะชื่อกลุ่ม ระดับชั้น ห้อง และสมาชิก ไม่คัดลอกผลประเมิน/กำหนดส่ง/ลิงก์
+  // กลุ่มที่เคยคัดลอกแล้ว หรือมีนักศึกษาซ้ำกับกลุ่มของอาจารย์ปัจจุบัน จะไม่แสดงอีก
+  const ownedMemberIds = new Set(
+    ownedGroups.flatMap(group => (group.members || []).map(id => String(id)))
+  );
+  const copiedSourceGroupIds = new Set(
+    ownedGroups.map(group => String(group.copiedFromGroupId || '')).filter(Boolean)
+  );
+  const ownedGroupSignatures = new Set(ownedGroups.map(getGroupMemberSignature));
+
   const groupTemplateSourceGroups = (db.groups || []).filter(g => {
     if (adminMode) return true;
-    return String(g.teacherId ?? '') !== String(user.id ?? '');
+    if (String(g.teacherId ?? '') === String(user.id ?? '')) return false;
+
+    // เคยคัดลอกจากกลุ่มนี้โดยตรงแล้ว
+    if (copiedSourceGroupIds.has(String(g.id ?? ''))) return false;
+
+    // รองรับกลุ่มที่คัดลอกจากเวอร์ชันเก่า ซึ่งยังไม่มี copiedFromGroupId
+    if (ownedGroupSignatures.has(getGroupMemberSignature(g))) return false;
+
+    // ถ้ามีนักศึกษาคนใดในกลุ่มต้นแบบอยู่ในกลุ่มของอาจารย์คนนี้แล้ว ให้ซ่อนเพื่อกันซ้ำ
+    const hasAssignedMember = (g.members || []).some(id => ownedMemberIds.has(String(id)));
+    if (hasAssignedMember) return false;
+
+    return true;
   });
 
   const groupTemplateTeacherOptions = Array.from(new Set(groupTemplateSourceGroups.map(g => String(g.teacherId ?? '')).filter(Boolean)))
@@ -687,18 +732,59 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   const visibleGroupTemplates = groupTemplateSourceGroups
     .filter(g => groupTemplateTeacherFilter === 'all' || String(g.teacherId ?? '') === groupTemplateTeacherFilter)
     .sort((a, b) => {
+      const levelCompare = getLevelSortIndex(a.level) - getLevelSortIndex(b.level);
+      if (levelCompare !== 0) return levelCompare;
+      const roomCompare = compareRoomValue(a.room, b.room);
+      if (roomCompare !== 0) return roomCompare;
       const teacherCompare = getTeacherDisplayName(a.teacherId).localeCompare(getTeacherDisplayName(b.teacherId), 'th');
       if (teacherCompare !== 0) return teacherCompare;
-      const levelCompare = String(a.level || '').localeCompare(String(b.level || ''), 'th');
-      if (levelCompare !== 0) return levelCompare;
-      const roomCompare = String(a.room || '').localeCompare(String(b.room || ''), 'th');
-      if (roomCompare !== 0) return roomCompare;
-      return String(a.name || '').localeCompare(String(b.name || ''), 'th');
+      return String(a.name || '').localeCompare(String(b.name || ''), 'th', { numeric: true });
     });
 
+  const getStudentRecord = (id) => db.users.find(u => u.role === 'student' && String(u.id ?? '') === String(id ?? ''));
+
   const getStudentName = (id) => {
-    const s = db.users.find(u => String(u.id ?? '') === String(id ?? ''));
+    const s = getStudentRecord(id);
     return s ? `${s.fname} ${s.lname}` : id;
+  };
+
+  const getStudentRoom = (id) => {
+    const s = getStudentRecord(id);
+    return s?.room ? String(s.room) : '-';
+  };
+
+  const getGroupMemberRooms = (group) => {
+    const rooms = Array.from(new Set((group?.members || [])
+      .map(id => getStudentRecord(id)?.room)
+      .filter(Boolean)
+      .map(room => String(room))));
+    return rooms.sort(compareRoomValue);
+  };
+
+  const getGroupRoomLabel = (group) => {
+    const rooms = getGroupMemberRooms(group);
+    if (rooms.length > 1) return `ร่วมห้อง ${rooms.join(', ')}`;
+    if (rooms.length === 1) return `ห้อง ${rooms[0]}`;
+    return `ห้อง ${group?.room || '-'}`;
+  };
+
+  const toggleCrossRoom = () => {
+    if (!groupForm.allowCrossRoom) {
+      setGroupForm(p => ({ ...p, allowCrossRoom: true }));
+      return;
+    }
+
+    const keptMembers = (groupForm.members || []).filter(id => {
+      const student = getStudentRecord(id);
+      return student && normalizeMatchText(student.room) === normalizeMatchText(groupForm.room);
+    });
+    const removedCount = (groupForm.members || []).length - keptMembers.length;
+    const apply = () => setGroupForm(p => ({ ...p, allowCrossRoom: false, members: keptMembers }));
+    if (removedCount > 0) {
+      askConfirm(`ปิดโหมดร่วมห้องจะนำสมาชิกต่างห้องออก ${removedCount} คน ยืนยันหรือไม่?`, apply);
+    } else {
+      apply();
+    }
   };
 
   const handleSaveGroup = async () => {
@@ -706,8 +792,15 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     if(groupForm.members.length > 6) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 6 คน', 'error');
     if(adminMode && !groupForm.teacherId) return showToast('กรุณาเลือกอาจารย์ผู้ควบคุม', 'error');
 
+    const selectedStudents = (groupForm.members || []).map(id => getStudentRecord(id)).filter(Boolean);
+    const hasDifferentLevel = selectedStudents.some(student => normalizeMatchText(student.level) !== normalizeMatchText(groupForm.level));
+    if (hasDifferentLevel) return showToast('สมาชิกทุกคนต้องอยู่ในระดับชั้นเดียวกับกลุ่มโครงงาน', 'error');
+    const hasDifferentRoom = selectedStudents.some(student => normalizeMatchText(student.room) !== normalizeMatchText(groupForm.room));
+    if (!groupForm.allowCrossRoom && hasDifferentRoom) return showToast('พบสมาชิกต่างห้อง กรุณาเปิดโหมดร่วมห้องก่อนบันทึก', 'error');
+
     const normalizedGroup = {
       ...groupForm,
+      allowCrossRoom: !!groupForm.allowCrossRoom || new Set(selectedStudents.map(student => normalizeMatchText(student.room))).size > 1,
       teacherId: String(adminMode ? groupForm.teacherId : user.id ?? ''),
       members: (groupForm.members || []).map(id => String(id))
     };
@@ -879,9 +972,12 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
       teacherId: adminMode ? String(source.teacherId ?? '') : String(user.id ?? ''),
       level: source.level || LEVELS[0],
       room: source.room || ROOMS[0],
+      allowCrossRoom: source.allowCrossRoom === true || new Set(copiedMembers.map(id => normalizeMatchText(getStudentRecord(id)?.room)).filter(Boolean)).size > 1,
       members: copiedMembers,
       milestones: [],
-      links: []
+      links: [],
+      copiedFromGroupId: String(source.id ?? ''),
+      copiedFromTeacherId: String(source.teacherId ?? '')
     });
     setSearchStudent('');
     setIsGroupTemplateModalOpen(false);
@@ -923,7 +1019,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
           <div className="flex gap-2 flex-wrap justify-end">
             {!adminMode && <Button variant="secondary" onClick={()=>setIsPasswordModalOpen(true)} className="py-1.5 px-3 text-sm"><ShieldCheck size={16}/> รหัสผ่าน</Button>}
             {!adminMode && <Button variant="secondary" onClick={() => { setGroupTemplateTeacherFilter('all'); setIsGroupTemplateModalOpen(true); }} className="py-1.5 px-3 text-sm"><Copy size={16}/> คัดลอกกลุ่ม</Button>}
-            <Button onClick={() => { setGroupForm({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] }); setIsGroupModalOpen(true); }} className="py-1.5 px-3 text-sm"><Plus size={16}/> สร้าง</Button>
+            <Button onClick={() => { setGroupForm({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], allowCrossRoom: false, members: [], milestones: [], links: [], copiedFromGroupId: '', copiedFromTeacherId: '' }); setIsGroupModalOpen(true); }} className="py-1.5 px-3 text-sm"><Plus size={16}/> สร้าง</Button>
           </div>
         </div>
 
@@ -966,7 +1062,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
              <Card key={group.id} className={`cursor-pointer transition-all p-4 ${activeGroupId === group.id ? 'border-blue-500 ring-1 ring-blue-500 bg-blue-50/30' : 'hover:border-blue-300'}`}>
              <div onClick={() => setActiveGroupId(group.id)}>
                <h3 className="font-semibold text-gray-800 line-clamp-1">{group.name}</h3>
-               <p className="text-xs text-gray-500 mt-1">{group.level} / {group.room} • สมาชิก {group.members.length} คน</p>
+               <p className="text-xs text-gray-500 mt-1">{group.level} / {getGroupRoomLabel(group)} • สมาชิก {group.members.length} คน</p>
                <div className="mt-3">
                  <ProgressBar percent={calculateGroupProgress(group.milestones)} />
                </div>
@@ -992,13 +1088,13 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
                 <h2 className="text-2xl font-bold text-gray-800">{activeGroup.name}</h2>
                 <div className="flex flex-wrap gap-2 mt-3">
                   {activeGroup.members.map(mid => (
-                    <span key={mid} className="bg-gray-100 text-gray-700 text-xs px-2.5 py-1 rounded-full border border-gray-200">{getStudentName(mid)}</span>
+                    <span key={mid} className="bg-gray-100 text-gray-700 text-xs px-2.5 py-1 rounded-full border border-gray-200">{getStudentName(mid)} • ห้อง {getStudentRoom(mid)}</span>
                   ))}
                 </div>
               </div>
               <div className="flex gap-2">
                  <Button variant="danger" onClick={handleDeleteGroup}><Trash2 size={16}/></Button>
-                 <Button variant="secondary" onClick={() => { setGroupForm(activeGroup); setIsGroupModalOpen(true); }}><Edit2 size={16}/> แก้ไข</Button>
+                 <Button variant="secondary" onClick={() => { setGroupForm({ ...activeGroup, allowCrossRoom: activeGroup.allowCrossRoom === true || getGroupMemberRooms(activeGroup).length > 1 }); setIsGroupModalOpen(true); }}><Edit2 size={16}/> แก้ไข</Button>
               </div>
             </div>
 
@@ -1147,6 +1243,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
           <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
             <p className="text-sm font-semibold text-blue-800">เลือกกลุ่มนักศึกษาที่มีอยู่แล้วมาเป็นต้นแบบ</p>
             <p className="text-xs text-blue-700 mt-1">ระบบจะคัดลอกชื่อกลุ่ม ระดับชั้น ห้อง และสมาชิกมาให้คุณตรวจสอบก่อนบันทึก โดยไม่คัดลอกผลประเมิน กำหนดส่ง หรือลิงก์งานของอาจารย์ต้นฉบับ</p>
+            <p className="text-xs text-blue-700 mt-1 font-medium">กลุ่มที่คุณคัดลอกแล้ว หรือมีกลุ่มของคุณที่มีนักศึกษาซ้ำอยู่แล้ว จะถูกซ่อนจากรายการนี้โดยอัตโนมัติ</p>
           </div>
 
           <div>
@@ -1183,8 +1280,8 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
             )) : (
               <div className="text-center text-gray-500 py-10 border border-dashed border-gray-200 rounded-xl">
                 <Users size={34} className="mx-auto mb-2 text-gray-300"/>
-                <p className="font-medium">ยังไม่มีกลุ่มต้นแบบในรายการที่เลือก</p>
-                <p className="text-xs mt-1">ลองเลือกอาจารย์ท่านอื่น หรือให้อาจารย์สร้างกลุ่มก่อน</p>
+                <p className="font-medium">ไม่มีกลุ่มต้นแบบที่ยังสามารถคัดลอกได้</p>
+                <p className="text-xs mt-1">กลุ่มที่เคยคัดลอกแล้วหรือมีนักศึกษาซ้ำกับกลุ่มของคุณจะไม่แสดง เพื่อป้องกันข้อมูลซ้ำซ้อน</p>
               </div>
             )}
           </div>
@@ -1197,14 +1294,23 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
           {adminMode && <Select label="อาจารย์ผู้ควบคุม" value={groupForm.teacherId || ''} onChange={e => setGroupForm({...groupForm, teacherId:e.target.value})} options={db.users.filter(u=>u.role==='teacher').map(t=>({value:String(t.id ?? ''),label:`${t.title}${t.fname} ${t.lname} (${t.id})`}))} placeholder="เลือกอาจารย์ผู้ควบคุม" />}
           <div className="grid grid-cols-2 gap-4">
             <Select label="ระดับชั้น" value={groupForm.level} onChange={e => setGroupForm({...groupForm, level: e.target.value, members: []})} options={LEVELS} />
-            <Select label="ห้อง" value={groupForm.room} onChange={e => setGroupForm({...groupForm, room: e.target.value, members: []})} options={ROOMS} />
+            <Select label={groupForm.allowCrossRoom ? 'ห้องหลัก' : 'ห้อง'} value={groupForm.room} onChange={e => setGroupForm(p => ({...p, room: e.target.value, members: p.allowCrossRoom ? p.members : []}))} options={ROOMS} />
+          </div>
+          <div className={`rounded-xl border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${groupForm.allowCrossRoom ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-gray-50'}`}>
+            <div>
+              <p className="text-sm font-semibold text-gray-800">โหมดร่วมห้อง</p>
+              <p className="text-xs text-gray-500 mt-0.5">เปิดเพื่อเลือกนักศึกษาห้องอื่นในระดับชั้นเดียวกันมาอยู่กลุ่มเดียวกัน</p>
+            </div>
+            <Button variant={groupForm.allowCrossRoom ? 'primary' : 'secondary'} onClick={toggleCrossRoom} className="shrink-0">
+              <Users size={16}/> {groupForm.allowCrossRoom ? 'ร่วมห้อง: เปิด' : 'ร่วมห้อง'}
+            </Button>
           </div>
           <div className="pt-2 border-t border-gray-100">
              <div className="flex justify-between items-center mb-2"><p className="text-sm font-medium">เลือกนักศึกษาเข้ากลุ่ม</p><span className={`text-xs font-semibold ${groupForm.members.length>=6?'text-red-500':'text-gray-400'}`}>{groupForm.members.length}/6 คน</span></div>
              <div className="flex flex-wrap gap-2 mb-3">
               {groupForm.members.map(mid => (
                 <div key={mid} className="bg-blue-50 border border-blue-200 text-blue-800 text-xs px-2 py-1 rounded-md flex items-center gap-1">
-                  {getStudentName(mid)}
+                  {getStudentName(mid)} <span className="text-blue-500">• ห้อง {getStudentRoom(mid)}</span>
                   <button onClick={() => setGroupForm(p => ({...p, members: p.members.filter(id=>String(id)!==String(mid))}))} className="text-blue-400 hover:text-red-500"><X size={14}/></button>
                 </div>
               ))}
@@ -1213,6 +1319,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
               type="text" placeholder="ค้นหาด้วยรหัส ชื่อ หรือนามสกุล..." value={searchStudent} onChange={e => setSearchStudent(e.target.value)}
               className="w-full border border-gray-200 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
             />
+            {groupForm.allowCrossRoom && <p className="text-xs text-blue-600 mt-1">กำลังค้นหานักศึกษาทุกห้องในระดับ {groupForm.level}</p>}
             {searchStudent && (
               <div className="mt-1 border border-gray-200 rounded-lg shadow-sm max-h-40 overflow-y-auto bg-white">
                 {db.users.filter(u => {
@@ -1220,11 +1327,15 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
                   const q = normalize(searchStudent);
                   const sameLevel = normalize(u.level) === normalize(groupForm.level);
                   const sameRoom = normalize(u.room) === normalize(groupForm.room);
+                  const roomAllowed = groupForm.allowCrossRoom ? true : sameRoom;
                   const haystack = normalize(`${u.id} ${u.title || ''} ${u.fname || ''} ${u.lname || ''}`);
-                  return u.role === 'student' && sameLevel && sameRoom && !groupForm.members.some(mid => String(mid) === String(u.id)) && haystack.includes(q);
+                  return u.role === 'student' && sameLevel && roomAllowed && !groupForm.members.some(mid => String(mid) === String(u.id)) && haystack.includes(q);
                 }).map(student => (
                   <div key={student.id} onClick={() => { if(groupForm.members.length>=6) return showToast('1 กลุ่มมีสมาชิกได้ไม่เกิน 6 คน','error'); setGroupForm(p => ({...p, members: [...p.members, String(student.id)]})); setSearchStudent(''); }} className="px-4 py-2 hover:bg-gray-50 cursor-pointer text-sm">
-                    {student.fname} {student.lname} ({student.id})
+                    <div className="flex items-center justify-between gap-3">
+                      <span>{student.fname} {student.lname} ({student.id})</span>
+                      <span className="text-xs text-gray-400 shrink-0">ห้อง {student.room || '-'}</span>
+                    </div>
                   </div>
                 ))}
                 {db.users.filter(u => {
@@ -1232,8 +1343,9 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
                   const q = normalize(searchStudent);
                   const sameLevel = normalize(u.level) === normalize(groupForm.level);
                   const sameRoom = normalize(u.room) === normalize(groupForm.room);
+                  const roomAllowed = groupForm.allowCrossRoom ? true : sameRoom;
                   const haystack = normalize(`${u.id} ${u.title || ''} ${u.fname || ''} ${u.lname || ''}`);
-                  return u.role === 'student' && sameLevel && sameRoom && !groupForm.members.some(mid => String(mid) === String(u.id)) && haystack.includes(q);
+                  return u.role === 'student' && sameLevel && roomAllowed && !groupForm.members.some(mid => String(mid) === String(u.id)) && haystack.includes(q);
                 }).length === 0 && (
                    <p className="px-4 py-3 text-sm text-gray-500 text-center">ไม่พบรายชื่อนักศึกษา</p>
                 )}
