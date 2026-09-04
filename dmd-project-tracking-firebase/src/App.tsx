@@ -12,7 +12,7 @@ import {
 const DEFAULT_LEVELS = ['ปวช. 1', 'ปวช. 2', 'ปวช. 3', 'ปวส. 1', 'ปวส. 2'];
 const DEFAULT_ROOMS = ['1', '2', '3', '4'];
 const ADMIN_PASSWORD = '995622';
-const APP_VERSION = '8.0.3';
+const APP_VERSION = '8.0.4';
 const DB_SCHEMA_VERSION = 8;
 const ACTIVE_COLLECTIONS = ['users', 'groups', 'templates', 'submissions'];
 const LEGACY_COLLECTIONS = ['loginIndex', 'authProfiles', 'sessions', 'publicStudents', 'publicProjects', 'publicStats', 'auditLogs'];
@@ -611,13 +611,30 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   const [groupTemplateTeacherFilter, setGroupTemplateTeacherFilter] = useState('all');
   const [groupForm, setGroupForm] = useState({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] });
   const [searchStudent, setSearchStudent] = useState('');
+  const [levelFilter, setLevelFilter] = useState('all');
+  const [groupStudentSearch, setGroupStudentSearch] = useState('');
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const [milestoneDrafts, setMilestoneDrafts] = useState({});
 
-  const myGroups = adminMode ? db.groups : db.groups.filter(g => String(g.teacherId ?? '') === String(user.id ?? ''));
+  const ownedGroups = adminMode ? (db.groups || []) : (db.groups || []).filter(g => String(g.teacherId ?? '') === String(user.id ?? ''));
+  const groupStudentNeedle = normalizeMatchText(groupStudentSearch);
+  const matchingStudentIds = new Set(
+    (db.users || [])
+      .filter(u => {
+        if (u.role !== 'student' || !groupStudentNeedle) return false;
+        const haystack = normalizeMatchText(`${u.id || ''}${u.title || ''}${u.fname || ''}${u.lname || ''}`);
+        return haystack.includes(groupStudentNeedle);
+      })
+      .map(u => String(u.id))
+  );
+  const myGroups = ownedGroups.filter(g => {
+    const matchesLevel = levelFilter === 'all' || normalizeMatchText(g.level) === normalizeMatchText(levelFilter);
+    const matchesStudent = !groupStudentNeedle || (g.members || []).some(mid => matchingStudentIds.has(String(mid)));
+    return matchesLevel && matchesStudent;
+  });
   const allTemplates = db.templates || [];
   const activeGroup = myGroups.find(g => g.id === activeGroupId);
 
@@ -630,7 +647,13 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
       String(m.id),
       { desc: String(m.desc || ''), percent: Number(m.percent || 0) }
     ])));
-  }, [activeGroupId]);
+  }, [activeGroupId, levelFilter, groupStudentSearch, db.groups]);
+
+  useEffect(() => {
+    if (activeGroupId && !myGroups.some(g => String(g.id) === String(activeGroupId))) {
+      setActiveGroupId(null);
+    }
+  }, [levelFilter, groupStudentSearch, db.groups]);
 
   const getTeacherDisplayName = (teacherId) => {
     const teacher = db.users.find(u => u.role === 'teacher' && String(u.id ?? '') === String(teacherId ?? ''));
@@ -903,6 +926,41 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
             <Button onClick={() => { setGroupForm({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], members: [], milestones: [], links: [] }); setIsGroupModalOpen(true); }} className="py-1.5 px-3 text-sm"><Plus size={16}/> สร้าง</Button>
           </div>
         </div>
+
+        <div className="rounded-xl border border-gray-200 bg-white p-3 space-y-3">
+          <div>
+            <label className="block text-xs font-semibold text-gray-600 mb-1.5">กรองระดับชั้น</label>
+            <select
+              value={levelFilter}
+              onChange={e => setLevelFilter(e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2.5 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="all">ทุกระดับชั้น</option>
+              {LEVELS.map(level => <option key={level} value={level}>{level}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-gray-600 mb-1.5">ค้นหานักศึกษาในกลุ่ม</label>
+            <div className="relative">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"/>
+              <input
+                type="text"
+                value={groupStudentSearch}
+                onChange={e => setGroupStudentSearch(e.target.value)}
+                placeholder="ชื่อ / นามสกุล / รหัสนักศึกษา"
+                className="w-full border border-gray-200 rounded-lg pl-9 pr-9 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              {groupStudentSearch && <button type="button" onClick={() => setGroupStudentSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-700"><X size={15}/></button>}
+            </div>
+          </div>
+          <div className="flex items-center justify-between text-xs text-gray-500">
+            <span>แสดง {myGroups.length} จาก {ownedGroups.length} กลุ่ม</span>
+            {(levelFilter !== 'all' || groupStudentSearch) && (
+              <button type="button" onClick={() => { setLevelFilter('all'); setGroupStudentSearch(''); }} className="text-blue-600 hover:underline">ล้างตัวกรอง</button>
+            )}
+          </div>
+        </div>
+
         <div className="space-y-3">
           {myGroups.map(group => (
              <Card key={group.id} className={`cursor-pointer transition-all p-4 ${activeGroupId === group.id ? 'border-blue-500 ring-1 ring-blue-500 bg-blue-50/30' : 'hover:border-blue-300'}`}>
@@ -918,7 +976,11 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
              </div>
            </Card>
           ))}
-          {myGroups.length === 0 && <p className="text-sm text-gray-500 text-center py-4 bg-gray-50 rounded-lg">ยังไม่มีกลุ่มโครงงาน</p>}
+          {myGroups.length === 0 && (
+            <p className="text-sm text-gray-500 text-center py-4 bg-gray-50 rounded-lg">
+              {ownedGroups.length === 0 ? 'ยังไม่มีกลุ่มโครงงาน' : 'ไม่พบกลุ่มที่ตรงกับระดับชั้นหรือนักศึกษาที่ค้นหา'}
+            </p>
+          )}
         </div>
       </div>
 
@@ -1452,6 +1514,7 @@ export default function App() {
   const [loginId, setLoginId] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [parentSelectedStudentId, setParentSelectedStudentId] = useState('');
   const [pendingTeacherSetup, setPendingTeacherSetup] = useState(null);
   const [firstPassword, setFirstPassword] = useState('');
   const [confirmFirstPassword, setConfirmFirstPassword] = useState('');
@@ -2187,6 +2250,15 @@ export default function App() {
     showToast('ตั้งรหัสผ่านสำเร็จ');
   };
 
+  const parentSearchNeedle = normalizeMatchText(searchQuery);
+  const parentSearchResults = parentSearchNeedle
+    ? (db.users || []).filter(u => {
+        if (u.role !== 'student') return false;
+        const haystack = normalizeMatchText(`${u.id || ''}${u.title || ''}${u.fname || ''}${u.lname || ''}`);
+        return haystack.includes(parentSearchNeedle);
+      }).slice(0, 20)
+    : [];
+
   const handleLogin = async e => {
     e.preventDefault();
     try {
@@ -2213,13 +2285,20 @@ export default function App() {
       if (!fresh?.users?.length) fresh = await withTimeout(loadAllData(), 30000, 'การโหลดข้อมูลผู้ใช้งาน');
 
       if (role === 'parent') {
-        const q = searchQuery.trim().toLowerCase();
-        const student = fresh.users.find(u => u.role === 'student' && (
-          String(u.id).toLowerCase() === q ||
-          String(u.fname || '').toLowerCase().includes(q) ||
-          String(u.lname || '').toLowerCase().includes(q)
-        ));
-        if (!student) throw new Error('ไม่พบข้อมูลนักศึกษาที่ค้นหา');
+        const q = normalizeMatchText(searchQuery);
+        if (!q) throw new Error('กรุณากรอกรหัส ชื่อ หรือนามสกุลนักศึกษา');
+        const matches = fresh.users.filter(u => {
+          if (u.role !== 'student') return false;
+          const haystack = normalizeMatchText(`${u.id || ''}${u.title || ''}${u.fname || ''}${u.lname || ''}`);
+          return haystack.includes(q);
+        });
+        const exactId = matches.find(u => normalizeMatchText(u.id) === q);
+        const selected = parentSelectedStudentId
+          ? matches.find(u => String(u.id) === String(parentSelectedStudentId)) || fresh.users.find(u => u.role === 'student' && String(u.id) === String(parentSelectedStudentId))
+          : null;
+        const student = selected || exactId || (matches.length === 1 ? matches[0] : null);
+        if (!matches.length && !selected) throw new Error('ไม่พบข้อมูลนักศึกษาที่ค้นหา');
+        if (!student && matches.length > 1) throw new Error('พบชื่อนักศึกษามากกว่า 1 คน กรุณาเลือกชื่อจากรายการก่อนเข้าสู่ระบบ');
         setCurrentUser(student);
         sessionStorage.setItem('dmd_web_session', JSON.stringify({ role: 'parent', id: student.id }));
         return;
@@ -2268,6 +2347,7 @@ export default function App() {
     setFirstPassword('');
     setConfirmFirstPassword('');
     setSearchQuery('');
+    setParentSelectedStudentId('');
     try {
       await ensureAnonymousSession();
       await loadAllData();
@@ -2289,20 +2369,55 @@ export default function App() {
                 <h2 className="text-center font-medium text-gray-500 mb-6">เลือกสถานะเพื่อเข้าใช้งาน</h2>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('student')}><UserCircle className="text-blue-500"/> นักศึกษา (Student)</Button>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('teacher')}><CheckCircle className="text-green-500"/> อาจารย์ผู้ควบคุม (Teacher)</Button>
-                <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('parent')}><Search className="text-amber-500"/> ผู้เข้าชม (Parent)</Button>
+                <Button variant="secondary" className="w-full justify-start py-3" onClick={() => { setRole('parent'); setSearchQuery(''); setParentSelectedStudentId(''); }}><Search className="text-amber-500"/> ผู้เข้าชม (Parent)</Button>
                 <Button variant="secondary" className="w-full justify-start py-3" onClick={() => setRole('admin')}><Settings className="text-gray-500"/> ผู้จัดการระบบ (Admin)</Button>
               </div>
             ) : (
               <form onSubmit={handleLogin} className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <div className="flex items-center gap-2 text-blue-600 font-semibold mb-2"><button type="button" onClick={() => setRole(null)} className="p-1 hover:bg-blue-50 rounded"><ChevronRight className="rotate-180" size={18}/></button>เข้าสู่ระบบในฐานะ {role === 'student' ? 'นักศึกษา' : role === 'teacher' ? 'อาจารย์ผู้ควบคุม' : role === 'admin' ? 'ผู้จัดการระบบ' : 'ผู้เข้าชม'}</div>
-                {role === 'parent'
-                  ? <Input label="ค้นหานักศึกษา" placeholder="กรอกรหัสนักศึกษา หรือ ชื่อ..." required value={searchQuery} onChange={e => setSearchQuery(e.target.value)}/>
-                  : <Input label="รหัสผู้ใช้งาน" placeholder={role === 'admin' ? 'กรอก admin' : 'กรอกรหัส...'} required value={loginId} onChange={e => setLoginId(e.target.value)}/>
-                }
+                <div className="flex items-center gap-2 text-blue-600 font-semibold mb-2"><button type="button" onClick={() => { setRole(null); setParentSelectedStudentId(''); setSearchQuery(''); }} className="p-1 hover:bg-blue-50 rounded"><ChevronRight className="rotate-180" size={18}/></button>เข้าสู่ระบบในฐานะ {role === 'student' ? 'นักศึกษา' : role === 'teacher' ? 'อาจารย์ผู้ควบคุม' : role === 'admin' ? 'ผู้จัดการระบบ' : 'ผู้เข้าชม'}</div>
+                {role === 'parent' ? (
+                  <div className="space-y-2">
+                    <Input
+                      label="ค้นหานักศึกษา"
+                      placeholder="กรอกรหัส ชื่อ หรือนามสกุล"
+                      required
+                      value={searchQuery}
+                      onChange={e => { setSearchQuery(e.target.value); setParentSelectedStudentId(''); }}
+                    />
+                    {searchQuery.trim() && (
+                      <div className="border border-gray-200 rounded-xl overflow-hidden max-h-60 overflow-y-auto bg-white">
+                        {parentSearchResults.length > 0 ? parentSearchResults.map(student => {
+                          const selected = String(parentSelectedStudentId) === String(student.id);
+                          return (
+                            <button
+                              type="button"
+                              key={student.id}
+                              onClick={() => { setParentSelectedStudentId(String(student.id)); setSearchQuery(`${student.fname || ''} ${student.lname || ''}`.trim()); }}
+                              className={`w-full text-left px-4 py-3 border-b last:border-b-0 hover:bg-blue-50 transition ${selected ? 'bg-blue-50 ring-1 ring-inset ring-blue-200' : ''}`}
+                            >
+                              <div className="flex justify-between gap-3">
+                                <div>
+                                  <p className="font-semibold text-sm text-gray-800">{student.title || ''}{student.fname || ''} {student.lname || ''}</p>
+                                  <p className="text-xs text-gray-500 mt-0.5">รหัส {student.id} • {student.level || '-'} / ห้อง {student.room || '-'}</p>
+                                </div>
+                                {selected && <CheckCircle size={18} className="text-blue-600 shrink-0 mt-0.5"/>}
+                              </div>
+                            </button>
+                          );
+                        }) : (
+                          <div className="px-4 py-3 text-sm text-gray-400 text-center">ไม่พบรายชื่อนักศึกษาที่ตรงกับคำค้น</div>
+                        )}
+                      </div>
+                    )}
+                    <p className="text-xs text-gray-400">ค้นหาได้ทั้งรหัสนักศึกษา ชื่อ หรือนามสกุล หากมีชื่อซ้ำให้เลือกบุคคลจากรายการ</p>
+                  </div>
+                ) : (
+                  <Input label="รหัสผู้ใช้งาน" placeholder={role === 'admin' ? 'กรอก admin' : 'กรอกรหัส...'} required value={loginId} onChange={e => setLoginId(e.target.value)}/>
+                )}
                 {role === 'teacher' && <Input label="รหัสผ่าน" type="password" placeholder="กรอกรหัสผ่าน หรือรหัสตั้งต้นครั้งแรก" required value={loginPassword} onChange={e=>setLoginPassword(e.target.value)}/>}
                 {role === 'admin' && <Input label="รหัสผ่านผู้จัดการระบบ" type="password" placeholder="กรอกรหัสผ่าน" required value={loginPassword} onChange={e=>setLoginPassword(e.target.value)}/>}
                 <Button type="submit" className="w-full mt-4">เข้าสู่ระบบ</Button>
-                <div className="text-xs text-gray-400 mt-6 pt-4 border-t text-center flex flex-col gap-1 items-center justify-center"><span className="flex items-center gap-1"><ShieldCheck size={14}/> ระบบพร้อมใช้งาน</span><span>{role === 'admin' ? 'เข้าสู่ระบบด้วยรหัสผู้ใช้ admin และรหัสผ่านผู้จัดการระบบ' : role === 'parent' ? 'ค้นหาด้วยรหัสหรือชื่อนักศึกษา' : role === 'teacher' ? 'ใช้รหัสอาจารย์ + รหัสผ่านส่วนตัว' : 'ใช้รหัสประจำตัวเข้าสู่ระบบได้โดยตรง'}</span></div>
+                <div className="text-xs text-gray-400 mt-6 pt-4 border-t text-center flex flex-col gap-1 items-center justify-center"><span className="flex items-center gap-1"><ShieldCheck size={14}/> ระบบพร้อมใช้งาน</span><span>{role === 'admin' ? 'เข้าสู่ระบบด้วยรหัสผู้ใช้ admin และรหัสผ่านผู้จัดการระบบ' : role === 'parent' ? 'ค้นหาได้ด้วยรหัส ชื่อ หรือนามสกุลนักศึกษา' : role === 'teacher' ? 'ใช้รหัสอาจารย์ + รหัสผ่านส่วนตัว' : 'ใช้รหัสประจำตัวเข้าสู่ระบบได้โดยตรง'}</span></div>
               </form>
             )}
           </div>
