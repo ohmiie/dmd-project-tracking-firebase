@@ -1,15 +1,15 @@
-import { getApp, getApps, initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getApp, getApps, initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
 
-// Single production Firebase project used by DMD Integrated Project Tracking System.
+// DMD Project Tracking2 - Clean Production Firebase
 export const firebaseConfig = {
-  apiKey: "AIzaSyAEA6MoMZP74LzKxeZxp7Gh_Bd_ajhsS5o",
-  authDomain: "dmd--project-tracking.firebaseapp.com",
-  projectId: "dmd--project-tracking",
-  storageBucket: "dmd--project-tracking.firebasestorage.app",
-  messagingSenderId: "774467315571",
-  appId: "1:774467315571:web:4252c97db0092b19e14706"
+  apiKey: "AIzaSyDQ669HDsElGchr6mi13bjqliZkShrKSzQ",
+  authDomain: "dmd-project-tracking2.firebaseapp.com",
+  projectId: "dmd-project-tracking2",
+  storageBucket: "dmd-project-tracking2.firebasestorage.app",
+  messagingSenderId: "535399984682",
+  appId: "1:535399984682:web:c17b41f84f6574c6655d53"
 };
 
 export const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
