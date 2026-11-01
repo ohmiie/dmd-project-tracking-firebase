@@ -12,7 +12,7 @@ import {
 const DEFAULT_LEVELS = ['ปวช. 1', 'ปวช. 2', 'ปวช. 3', 'ปวส. 1', 'ปวส. 2'];
 const DEFAULT_ROOMS = ['1', '2', '3', '4'];
 const ADMIN_PASSWORD = '995622';
-const APP_VERSION = '8.0.9';
+const APP_VERSION = '8.0.10';
 const DB_SCHEMA_VERSION = 8;
 const ACTIVE_COLLECTIONS = ['users', 'groups', 'templates', 'submissions'];
 const LEGACY_COLLECTIONS = ['loginIndex', 'authProfiles', 'sessions', 'publicStudents', 'publicProjects', 'publicStats', 'auditLogs'];
@@ -336,6 +336,8 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
   const [editingUser, setEditingUser] = useState(null);
   const [formData, setFormData] = useState({ id: '', title: '', fname: '', lname: '', level: LEVELS[0], room: ROOMS[0] });
   const [setupCodeDialog, setSetupCodeDialog] = useState({ isOpen: false, code: '123456', teacher: null, teacherName: '' });
+  const [isPrintReportModalOpen, setIsPrintReportModalOpen] = useState(false);
+  const [printReportLevel, setPrintReportLevel] = useState('all');
   const [systemBusy, setSystemBusy] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -610,14 +612,28 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
     window.open(parentPortalUrl, '_blank', 'noopener,noreferrer');
   };
 
-  const printAdminReport = () => {
-    const sortedGroups = [...(db.groups || [])].sort((a, b) => {
+  const printAdminReport = (selectedLevel = 'all') => {
+    const allGroups = db.groups || [];
+    const reportGroups = selectedLevel === 'all'
+      ? allGroups
+      : allGroups.filter(g => normalizeMatchText(g.level) === normalizeMatchText(selectedLevel));
+    const sortedGroups = [...reportGroups].sort((a, b) => {
       const levelCompare = getLevelSortIndex(a.level) - getLevelSortIndex(b.level);
       if (levelCompare !== 0) return levelCompare;
       const roomCompare = compareRoomValue(a.room, b.room);
       if (roomCompare !== 0) return roomCompare;
       return String(a.name || '').localeCompare(String(b.name || ''), 'th', { numeric: true });
     });
+    const reportStudents = selectedLevel === 'all'
+      ? students
+      : students.filter(s => normalizeMatchText(s.level) === normalizeMatchText(selectedLevel));
+    const reportLevelStats = selectedLevel === 'all'
+      ? levelStats
+      : levelStats.filter(x => normalizeMatchText(x.level) === normalizeMatchText(selectedLevel));
+    const reportAvgProgress = sortedGroups.length
+      ? sortedGroups.reduce((sum, g) => sum + calculateGroupProgress(g.milestones || []), 0) / sortedGroups.length
+      : 0;
+    const levelLabel = selectedLevel === 'all' ? 'ทุกระดับชั้น' : selectedLevel;
     const teacherName = teacherId => {
       const t = teachers.find(x => String(x.id) === String(teacherId));
       return t ? `${t.title || ''}${t.fname || ''} ${t.lname || ''}`.trim() : String(teacherId || '-');
@@ -633,36 +649,37 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
         count: groups.length,
         progress: groups.length ? groups.reduce((sum, g) => sum + calculateGroupProgress(g.milestones || []), 0) / groups.length : 0
       };
-    }).sort((a,b)=>a.teacher.localeCompare(b.teacher,'th'));
+    }).filter(x => selectedLevel === 'all' || x.count > 0).sort((a,b)=>a.teacher.localeCompare(b.teacher,'th'));
 
     const body = `
       <div class="header">
         <h1>รายงานสรุประบบติดตามโครงงานบูรณาการ สาขา DMD</h1>
         <p class="muted">DMD Integrated Project Tracking System • รายงานสำหรับผู้บริหาร</p>
       </div>
-      <div class="meta"><span>วันที่ออกรายงาน: ${escapeHtml(formatThaiDateTime())}</span><span>เวอร์ชันระบบ: v${escapeHtml(APP_VERSION)}</span></div>
+      <div class="meta"><span>ระดับชั้น: <b>${escapeHtml(levelLabel)}</b></span><span>วันที่ออกรายงาน: ${escapeHtml(formatThaiDateTime())}</span><span>เวอร์ชันระบบ: v${escapeHtml(APP_VERSION)}</span></div>
       <div class="summary">
-        <div>นักศึกษาทั้งหมด<b>${students.length}</b></div>
-        <div>อาจารย์ผู้ควบคุม<b>${teachers.length}</b></div>
+        <div>นักศึกษาในระดับที่เลือก<b>${reportStudents.length}</b></div>
+        <div>อาจารย์ผู้ควบคุม<b>${teacherStats.length}</b></div>
         <div>กลุ่มโครงงาน<b>${sortedGroups.length}</b></div>
-        <div>ความคืบหน้าเฉลี่ย<b>${avgProgress.toFixed(0)}%</b></div>
+        <div>ความคืบหน้าเฉลี่ย<b>${reportAvgProgress.toFixed(0)}%</b></div>
       </div>
       <h2>สรุปแยกตามระดับชั้น</h2>
       <table><thead><tr><th>ระดับชั้น</th><th class="right">นักศึกษา</th><th class="right">กลุ่ม</th><th class="right">ความคืบหน้าเฉลี่ย</th></tr></thead><tbody>
-        ${levelStats.map(x => `<tr><td>${escapeHtml(x.level)}</td><td class="right">${x.students}</td><td class="right">${x.groups}</td><td class="right">${x.progress.toFixed(0)}%</td></tr>`).join('')}
+        ${reportLevelStats.map(x => `<tr><td>${escapeHtml(x.level)}</td><td class="right">${x.students}</td><td class="right">${x.groups}</td><td class="right">${x.progress.toFixed(0)}%</td></tr>`).join('')}
       </tbody></table>
       <h2>สรุปตามอาจารย์ผู้ควบคุม</h2>
       <table><thead><tr><th>อาจารย์ผู้ควบคุม</th><th class="right">จำนวนกลุ่ม</th><th class="right">ความคืบหน้าเฉลี่ย</th></tr></thead><tbody>
-        ${teacherStats.map(x => `<tr><td>${escapeHtml(x.teacher)}</td><td class="right">${x.count}</td><td class="right">${x.progress.toFixed(0)}%</td></tr>`).join('')}
+        ${teacherStats.map(x => `<tr><td>${escapeHtml(x.teacher)}</td><td class="right">${x.count}</td><td class="right">${x.progress.toFixed(0)}%</td></tr>`).join('') || '<tr><td colspan="3" class="center muted">ไม่มีกลุ่มในระดับชั้นที่เลือก</td></tr>'}
       </tbody></table>
-      <h2>รายละเอียดกลุ่มโครงงานทั้งหมด</h2>
+      <h2>รายละเอียดกลุ่มโครงงาน — ${escapeHtml(levelLabel)}</h2>
       <table><thead><tr><th style="width:4%">ลำดับ</th><th style="width:27%">ชื่อกลุ่มโครงงาน</th><th style="width:12%">ระดับ/ห้อง</th><th style="width:20%">อาจารย์ผู้ควบคุม</th><th>สมาชิก</th><th class="right" style="width:9%">ความคืบหน้า</th></tr></thead><tbody>
-        ${sortedGroups.map((g, i) => `<tr><td class="center">${i+1}</td><td>${escapeHtml(g.name)}</td><td>${escapeHtml(g.level)} / ${escapeHtml(g.room)}</td><td>${escapeHtml(teacherName(g.teacherId))}</td><td>${(g.members || []).map(studentName).map(escapeHtml).join(', ') || '-'}</td><td class="right">${calculateGroupProgress(g.milestones || []).toFixed(0)}%</td></tr>`).join('')}
+        ${sortedGroups.map((g, i) => `<tr><td class="center">${i+1}</td><td>${escapeHtml(g.name)}</td><td>${escapeHtml(g.level)} / ${escapeHtml(g.room)}</td><td>${escapeHtml(teacherName(g.teacherId))}</td><td>${(g.members || []).map(studentName).map(escapeHtml).join(', ') || '-'}</td><td class="right">${calculateGroupProgress(g.milestones || []).toFixed(0)}%</td></tr>`).join('') || '<tr><td colspan="6" class="center muted">ไม่มีกลุ่มในระดับชั้นที่เลือก</td></tr>'}
       </tbody></table>
       <div class="signatures"><div><div class="signature-line">ผู้จัดทำรายงาน</div></div><div><div class="signature-line">ผู้บริหาร/ผู้ตรวจสอบ</div></div></div>
     `;
-    const ok = openPrintableReport('รายงานสรุปโครงงานบูรณาการ DMD', body, { landscape: true });
+    const ok = openPrintableReport(`รายงานสรุปโครงงานบูรณาการ DMD - ${levelLabel}`, body, { landscape: true });
     if (!ok) showToast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์ กรุณาอนุญาต Pop-up', 'error');
+    if (ok) setIsPrintReportModalOpen(false);
   };
 
   const tabs = [
@@ -682,7 +699,7 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
           <h2 className="text-2xl font-bold text-gray-800">ผู้จัดการระบบ (Admin)</h2>
           <p className="text-sm text-gray-500 mt-1">ควบคุมข้อมูลผู้ใช้ โครงงาน คลังระดับชั้น/ห้อง และสถิติทั้งหมด</p>
         </div>
-        <Button variant="secondary" onClick={printAdminReport}><Printer size={16}/> พิมพ์รายงานรวม</Button>
+        <Button variant="secondary" onClick={() => { setPrintReportLevel('all'); setIsPrintReportModalOpen(true); }}><Printer size={16}/> พิมพ์รายงานรวม</Button>
       </div>
 
       <div className="flex gap-2 overflow-x-auto pb-1 border-b border-gray-200">
@@ -778,6 +795,20 @@ const AdminView = ({ db, handleUpdate, showToast, askConfirm, askPrompt, current
         </Card>
       </div>}
 
+      <Modal isOpen={isPrintReportModalOpen} onClose={()=>setIsPrintReportModalOpen(false)} title="เลือกระดับชั้นสำหรับพิมพ์รายงานรวม">
+        <div className="space-y-5">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">ระดับชั้นที่ต้องการพิมพ์</label>
+            <select value={printReportLevel} onChange={e=>setPrintReportLevel(e.target.value)} className="w-full border border-gray-200 rounded-lg px-4 py-2.5 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="all">ทุกระดับชั้น</option>
+              {LEVELS.map(level => <option key={level} value={level}>{level}</option>)}
+            </select>
+          </div>
+          <div className="rounded-xl bg-blue-50 border border-blue-100 p-4 text-sm text-blue-800">รายงานจะคำนวณยอดนักศึกษา จำนวนกลุ่ม และความคืบหน้าเฉพาะระดับชั้นที่เลือก</div>
+          <div className="flex justify-end gap-2 pt-2"><Button variant="secondary" onClick={()=>setIsPrintReportModalOpen(false)}>ยกเลิก</Button><Button onClick={()=>printAdminReport(printReportLevel)}><Printer size={16}/> เปิดหน้าพิมพ์</Button></div>
+        </div>
+      </Modal>
+
       <Modal isOpen={isModalOpen} onClose={()=>setIsModalOpen(false)} title={editingUser?'แก้ไขข้อมูล':'เพิ่มข้อมูลใหม่'}>
         <div className="space-y-4">
           <Input label="รหัส (ใช้ Login)" value={formData.id} onChange={e=>setFormData({...formData,id:e.target.value.trim()})} disabled={!!editingUser}/>
@@ -818,6 +849,8 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
   const [searchStudent, setSearchStudent] = useState('');
   const [levelFilter, setLevelFilter] = useState('all');
   const [groupStudentSearch, setGroupStudentSearch] = useState('');
+  const [isPrintReportModalOpen, setIsPrintReportModalOpen] = useState(false);
+  const [printReportLevel, setPrintReportLevel] = useState('all');
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -1199,8 +1232,11 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     showToast('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว');
   };
 
-  const printTeacherReport = () => {
-    const reportGroups = [...ownedGroups].sort((a, b) => {
+  const printTeacherReport = (selectedLevel = 'all') => {
+    const reportSourceGroups = selectedLevel === 'all'
+      ? ownedGroups
+      : ownedGroups.filter(g => normalizeMatchText(g.level) === normalizeMatchText(selectedLevel));
+    const reportGroups = [...reportSourceGroups].sort((a, b) => {
       const levelCompare = getLevelSortIndex(a.level) - getLevelSortIndex(b.level);
       if (levelCompare !== 0) return levelCompare;
       const roomCompare = compareRoomValue(a.room, b.room);
@@ -1208,6 +1244,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
       return String(a.name || '').localeCompare(String(b.name || ''), 'th', { numeric: true });
     });
     const teacherLabel = `${user.title || ''}${user.fname || ''} ${user.lname || ''}`.trim();
+    const levelLabel = selectedLevel === 'all' ? 'ทุกระดับชั้น' : selectedLevel;
     const avg = reportGroups.length ? reportGroups.reduce((sum, g) => sum + calculateGroupProgress(g.milestones || []), 0) / reportGroups.length : 0;
     const details = reportGroups.map((g, gi) => {
       const members = (g.members || []).map(id => {
@@ -1230,20 +1267,21 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
     const body = `
       <div class="header">
         <h1>รายงานติดตามโครงงานบูรณาการ สาขา DMD</h1>
-        <p class="muted">รายงานประจำอาจารย์ผู้ควบคุม</p>
+        <p class="muted">รายงานประจำอาจารย์ผู้ควบคุม • ${escapeHtml(levelLabel)}</p>
       </div>
-      <div class="meta"><span>อาจารย์ผู้ควบคุม: <b>${escapeHtml(teacherLabel || '-')}</b></span><span>วันที่ออกรายงาน: ${escapeHtml(formatThaiDateTime())}</span></div>
+      <div class="meta"><span>อาจารย์ผู้ควบคุม: <b>${escapeHtml(teacherLabel || '-')}</b></span><span>ระดับชั้น: <b>${escapeHtml(levelLabel)}</b></span><span>วันที่ออกรายงาน: ${escapeHtml(formatThaiDateTime())}</span></div>
       <div class="summary">
-        <div>กลุ่มโครงงานทั้งหมด<b>${reportGroups.length}</b></div>
+        <div>กลุ่มโครงงาน<b>${reportGroups.length}</b></div>
         <div>ความคืบหน้าเฉลี่ย<b>${avg.toFixed(0)}%</b></div>
         <div>รายการผ่านอนุมัติ<b>${reportGroups.reduce((sum,g)=>sum+(g.milestones||[]).filter(m=>m.status==='approved').length,0)}</b></div>
         <div>รายการไม่อนุมัติ<b>${reportGroups.reduce((sum,g)=>sum+(g.milestones||[]).filter(m=>m.status==='rejected').length,0)}</b></div>
       </div>
-      ${details || '<p class="center muted">ยังไม่มีกลุ่มโครงงาน</p>'}
+      ${details || `<p class="center muted">ยังไม่มีกลุ่มโครงงานในระดับ ${escapeHtml(levelLabel)}</p>`}
       <div class="signatures"><div><div class="signature-line">อาจารย์ผู้ควบคุม</div></div><div><div class="signature-line">ผู้ตรวจสอบ/หัวหน้าสาขา</div></div></div>
     `;
-    const ok = openPrintableReport(`รายงานโครงงาน - ${teacherLabel}`, body);
+    const ok = openPrintableReport(`รายงานโครงงาน - ${teacherLabel} - ${levelLabel}`, body);
     if (!ok) showToast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์ กรุณาอนุญาต Pop-up', 'error');
+    if (ok) setIsPrintReportModalOpen(false);
   };
 
   return (
@@ -1252,7 +1290,7 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
         <div className="flex justify-between items-center gap-2">
           <h2 className="text-xl font-bold text-gray-800">{adminMode ? 'กลุ่มโครงงานทั้งหมด' : 'กลุ่มโครงงานของฉัน'}</h2>
           <div className="flex gap-2 flex-wrap justify-end">
-            {!adminMode && <Button variant="secondary" onClick={printTeacherReport} className="py-1.5 px-3 text-sm"><Printer size={16}/> พิมพ์รายงาน</Button>}
+            {!adminMode && <Button variant="secondary" onClick={() => { setPrintReportLevel(levelFilter); setIsPrintReportModalOpen(true); }} className="py-1.5 px-3 text-sm"><Printer size={16}/> พิมพ์รายงาน</Button>}
             {!adminMode && <Button variant="secondary" onClick={()=>setIsPasswordModalOpen(true)} className="py-1.5 px-3 text-sm"><ShieldCheck size={16}/> รหัสผ่าน</Button>}
             {!adminMode && <Button variant="secondary" onClick={() => { setGroupTemplateTeacherFilter('all'); setIsGroupTemplateModalOpen(true); }} className="py-1.5 px-3 text-sm"><Copy size={16}/> คัดลอกกลุ่ม</Button>}
             <Button onClick={() => { setGroupForm({ id: '', name: '', teacherId: adminMode ? '' : String(user.id ?? ''), level: LEVELS[0], room: ROOMS[0], allowCrossRoom: false, members: [], milestones: [], links: [], copiedFromGroupId: '', copiedFromTeacherId: '' }); setIsGroupModalOpen(true); }} className="py-1.5 px-3 text-sm"><Plus size={16}/> สร้าง</Button>
@@ -1464,6 +1502,20 @@ const TeacherView = ({ user, db, handleUpdate, showToast, askConfirm, askPrompt,
           </div>
         )}
       </div>
+
+      {!adminMode && <Modal isOpen={isPrintReportModalOpen} onClose={() => setIsPrintReportModalOpen(false)} title="เลือกระดับชั้นสำหรับพิมพ์รายงาน">
+        <div className="space-y-5">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">ระดับชั้นที่ต้องการพิมพ์</label>
+            <select value={printReportLevel} onChange={e=>setPrintReportLevel(e.target.value)} className="w-full border border-gray-200 rounded-lg px-4 py-2.5 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="all">ทุกระดับชั้น</option>
+              {LEVELS.map(level => <option key={level} value={level}>{level}</option>)}
+            </select>
+          </div>
+          <div className="rounded-xl bg-blue-50 border border-blue-100 p-4 text-sm text-blue-800">รายงานจะพิมพ์เฉพาะกลุ่มโครงงานของอาจารย์ในระดับชั้นที่เลือก พร้อมคำนวณความคืบหน้าใหม่เฉพาะกลุ่มเหล่านั้น</div>
+          <div className="flex justify-end gap-2 pt-2"><Button variant="secondary" onClick={()=>setIsPrintReportModalOpen(false)}>ยกเลิก</Button><Button onClick={()=>printTeacherReport(printReportLevel)}><Printer size={16}/> เปิดหน้าพิมพ์</Button></div>
+        </div>
+      </Modal>}
 
       {!adminMode && <Modal isOpen={isPasswordModalOpen} onClose={() => { setIsPasswordModalOpen(false); setCurrentPassword(''); setNewPassword(''); setConfirmNewPassword(''); }} title="เปลี่ยนรหัสผ่านอาจารย์">
         <div className="space-y-4">
